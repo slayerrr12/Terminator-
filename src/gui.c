@@ -59,6 +59,13 @@ static int append_to_current_line(Tab *t, const char *s, size_t n) {
   return 0;
 }
 
+static void clear_scrollback(Tab *t) {
+  for (size_t i = 0; i < t->line_count; i++)
+    free(t->lines[i]);
+  t->line_count = 0;
+  t->scroll = 0;
+}
+
 /*
  * Worker output arrives in arbitrary pipe-sized chunks. Append it to the
  * current row so a line split across reads is displayed as one terminal line.
@@ -116,29 +123,55 @@ static void make_prompt(const Tab *t, char *prompt, size_t size) {
   }
   snprintf(prompt, size, "%s@%s:%s$ ", user, host, cwd);
 }
+
+static int tab_cell_width(size_t count) {
+  int area = width - 56;
+  if (area < 1)
+    area = 1;
+  int cell = count ? area / (int)count : area;
+  if (cell > 180)
+    cell = 180;
+  return cell > 0 ? cell : 1;
+}
+
+static int tab_plus_x(size_t count) {
+  return 8 + (int)count * tab_cell_width(count) + 4;
+}
+
 static void draw(App *a) {
   if (!dpy)
     return;
   XClearWindow(dpy, win);
   if (font)
     XSetFont(dpy, gc, font->fid);
-  XSetForeground(dpy, gc, 0x4a2944);
-  XFillRectangle(dpy, win, gc, 0, 0, (unsigned)width, 26);
-  XSetForeground(dpy, gc, 0xf2f2f2);
-  int x = 10;
+  XSetForeground(dpy, gc, 0x3b1d34);
+  XFillRectangle(dpy, win, gc, 0, 0, (unsigned)width, 34);
+  const int left = 8;
+  int tab_width = tab_cell_width(a->count);
   for (size_t i = 0; i < a->count; i++) {
-    char label[128];
-    snprintf(label, sizeof(label), "[%zu: %s]%s", i + 1, a->tabs[i].cwd,
-             i == a->active ? " *" : "");
-    XDrawString(dpy, win, gc, x, 18, label, (int)strlen(label));
-    x += 180;
+    int x = left + (int)i * tab_width;
+    XSetForeground(dpy, gc, i == a->active ? 0x69435f : 0x4a2944);
+    int tab_fill_width = tab_width > 2 ? tab_width - 2 : 1;
+    XFillRectangle(dpy, win, gc, x, 4, (unsigned)tab_fill_width, 26);
+    XSetForeground(dpy, gc, 0xf2f2f2);
+    char label[24];
+    snprintf(label, sizeof(label), "%zu", i + 1);
+    int label_width = font ? XTextWidth(font, label, (int)strlen(label))
+                           : (int)strlen(label) * 8;
+    if (label_width <= tab_width - 8)
+      XDrawString(dpy, win, gc, x + (tab_width - label_width) / 2, 22, label,
+                  (int)strlen(label));
   }
-  XDrawString(dpy, win, gc, width - 35, 18, "[+]", 3);
+  int plus_x = tab_plus_x(a->count);
+  XSetForeground(dpy, gc, 0x4a2944);
+  XFillRectangle(dpy, win, gc, plus_x, 4, 32, 26);
+  XSetForeground(dpy, gc, 0xf2f2f2);
+  XDrawString(dpy, win, gc, plus_x + 12, 22, "+", 1);
   /* Keep terminal output and the input prompt readable on the dark background. */
   XSetForeground(dpy, gc, 0xf2f2f2);
   Tab *t = &a->tabs[a->active];
   int lineh = font ? font->ascent + font->descent + 3 : 18;
-  const int top = 48;
+  const int top = 54;
   int visible = (height - top - 10) / lineh;
   if (visible < 1)
     visible = 1;
@@ -309,10 +342,7 @@ static void handle_key(App *a, XKeyEvent *e) {
     t->input[t->input_len] = 0;
   }
   if (ctrl && k == XK_l) {
-    for (size_t i = 0; i < t->line_count; i++)
-      free(t->lines[i]);
-    t->line_count = 0;
-    t->scroll = 0;
+    clear_scrollback(t);
   }
   if (k == XK_Up && t->scroll < t->line_count)
     t->scroll += 10;
@@ -389,13 +419,17 @@ int gui_run(App *a) {
           handle_key(a, &ev.xkey);
           draw(a);
         } else if (ev.type == ButtonPress) {
-          if (ev.xbutton.y < 26) {
-            if (ev.xbutton.x > width - 50) {
+          if (ev.xbutton.y < 34) {
+            int plus_x = tab_plus_x(a->count);
+            if (ev.xbutton.x >= plus_x && ev.xbutton.x < plus_x + 32) {
               if (app_add_tab(a) < 0)
                 add_text(&a->tabs[a->active],
                          "terminator: maximum tabs reached\n", 34);
             } else {
-              size_t ix = (size_t)(ev.xbutton.x / 180);
+              int tab_width = tab_cell_width(a->count);
+              size_t ix = ev.xbutton.x >= 8
+                              ? (size_t)((ev.xbutton.x - 8) / tab_width)
+                              : a->count;
               if (ix < a->count)
                 a->active = ix;
             }
@@ -422,6 +456,8 @@ int gui_run(App *a) {
           while ((n = read(pf[i].fd, &message, sizeof(message))) ==
                  (ssize_t)sizeof(message)) {
             t->busy = 0;
+            if (message.clear_screen)
+              clear_scrollback(t);
             strncpy(t->cwd, message.cwd, sizeof(t->cwd) - 1);
             t->cwd[sizeof(t->cwd) - 1] = 0;
           }

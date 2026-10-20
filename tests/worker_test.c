@@ -283,6 +283,33 @@ static void test_two_tabs(int process_mode) {
   munmap(two.foreground, sizeof(*two.foreground));
 }
 
+static void test_clear_builtin(int process_mode) {
+  Harness h = start_worker(process_mode);
+  assert(write(h.in, "clear\n", 6) == 6);
+  WorkerStatus status;
+  assert(read(h.status, &status, sizeof(status)) == (ssize_t)sizeof(status));
+  assert(status.status == 0);
+  assert(status.clear_screen == 1);
+
+  assert(write(h.in, "exit\n", 5) == 5);
+  close(h.in);
+  char output[128] = {0};
+  ssize_t n = read(h.out, output, sizeof(output) - 1);
+  assert(n == 0);
+  close(h.out);
+  close(h.status);
+  if (process_mode) {
+    int child_status;
+    assert(waitpid(h.pid, &child_status, 0) == h.pid &&
+           WIFEXITED(child_status));
+  } else {
+    assert(pthread_join(h.thread, NULL) == 0);
+  }
+  sem_destroy(&h.history->lock);
+  munmap(h.history, sizeof(*h.history));
+  munmap(h.foreground, sizeof(*h.foreground));
+}
+
 static void test_interrupt_is_tab_scoped(int process_mode) {
   SharedHistory *history = mmap(NULL, sizeof(*history), PROT_READ | PROT_WRITE,
                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -477,6 +504,8 @@ static void test_multiwatch_interrupt(int process_mode) {
 int main(void) {
   run_case(0);
   run_case(1);
+  test_clear_builtin(0);
+  test_clear_builtin(1);
   test_two_tabs(0);
   test_two_tabs(1);
   test_interrupt_is_tab_scoped(0);

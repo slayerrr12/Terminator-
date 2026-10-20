@@ -37,7 +37,7 @@ The default mode starts one worker thread per tab. Process mode starts one worke
 
 - Xlib window with per-tab input/output buffers, command prompt, scrolling, tab switching, and non-blocking event polling.
 - External commands launched with `fork()` and `execvp()`.
-- Built-ins: `cd`, `exit`, `history`, `source`, `multiWatch`, `jobs`, `fg`, and `bg`.
+- Built-ins: `cd`, `clear`, `exit`, `history`, `source`, `multiWatch`, `jobs`, `fg`, and `bg`.
 - Shared, synchronized in-memory command history; each tab keeps its own working directory and `$?` status.
 - Pipelines of arbitrary length, input/output redirection (`<`, `>`, `>>`), and quote-aware filename globbing.
 - Environment and exit-status expansion, nested `$()` and backtick command substitution, single and double quotes, multiline quotes, and trailing-backslash continuation.

@@ -470,6 +470,7 @@ int shell_execute(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
     const char *name = command->argv[0];
     int parent_builtin = !pipeline->background &&
                          (!strcmp(name, "cd") || !strcmp(name, "exit") ||
+                          !strcmp(name, "clear") ||
                           !strcmp(name, "history") || !strcmp(name, "source") ||
                           !strcmp(name, "jobs") || !strcmp(name, "fg") ||
                           !strcmp(name, "bg") || !strcmp(name, "multiWatch"));

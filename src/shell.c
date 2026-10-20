@@ -52,6 +52,14 @@ static int builtin_exit(ShellContext *ctx, char **argv, int out) {
   return argv[1] ? atoi(argv[1]) : ctx->last_status;
 }
 
+/* Ask the GUI to clear this tab's scrollback without sending ANSI escapes. */
+static int builtin_clear(ShellContext *ctx, char **argv, int out) {
+  (void)argv;
+  (void)out;
+  ctx->clear_requested = 1;
+  return 0;
+}
+
 static int builtin_history(ShellContext *ctx, char **argv, int out) {
   (void)argv;
   char (*items)[TERM_LINE_MAX] = calloc(TERM_HISTORY_CAP, sizeof(*items));
@@ -133,6 +141,7 @@ typedef struct {
 } BuiltinEntry;
 static const BuiltinEntry builtins[] = {
     {"cd", builtin_cd},
+    {"clear", builtin_clear},
     {"exit", builtin_exit},
     {"history", builtin_history},
     {"jobs", builtin_jobs},
@@ -192,12 +201,14 @@ void worker_run(int input_fd, int output_fd, int status_fd,
         status = shell_run_line(&ctx, line, output_fd);
       }
       n = 0;
-      WorkerStatus message = {.status = status};
+      WorkerStatus message = {.status = status,
+                              .clear_screen = ctx.clear_requested};
       size_t cwd_len = strnlen(ctx.cwd, sizeof(message.cwd) - 1);
       memcpy(message.cwd, ctx.cwd, cwd_len);
       message.cwd[cwd_len] = '\0';
       ssize_t ignored = write(status_fd, &message, sizeof(message));
       (void)ignored;
+      ctx.clear_requested = 0;
       if (ctx.should_exit)
         break;
     } else if (n + 1 < sizeof(line))

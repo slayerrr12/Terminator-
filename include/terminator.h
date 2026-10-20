@@ -13,6 +13,7 @@
 #define TERM_CWD_MAX 1024
 typedef struct {
   int status;
+  int clear_screen;
   char cwd[TERM_CWD_MAX];
 } WorkerStatus;
 typedef struct {

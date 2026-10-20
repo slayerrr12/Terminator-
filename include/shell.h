@@ -32,6 +32,7 @@ typedef struct {
   char cwd[4096];
   int last_status;
   int should_exit;
+  int clear_requested;
   int next_job_id;
   pid_t process_group;
   SharedHistory *history;
