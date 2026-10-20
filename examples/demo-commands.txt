@@ -1,0 +1,11 @@
+# Try these commands in the Terminator window
+pwd
+echo hello
+echo 'literal $HOME' "expanded $HOME"
+echo "directory: $(basename $(pwd))"
+printf 'pear\napple\n' | sort | head -1
+printf 'three words\n' > /tmp/terminator-example.txt
+cat < /tmp/terminator-example.txt | wc -w
+cd /tmp
+pwd
+history

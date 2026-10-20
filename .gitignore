@@ -1,0 +1,7 @@
+/build/
+/terminator
+*.d
+core
+core.*
+/.vscode/
+/Terminator - Google Docs.pdf
