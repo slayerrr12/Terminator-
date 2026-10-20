@@ -63,6 +63,8 @@ static void draw(App *a) {
     x += 180;
   }
   XDrawString(dpy, win, gc, width - 35, 18, "[+]", 3);
+  /* Keep terminal output and the input prompt readable on the dark background. */
+  XSetForeground(dpy, gc, 0xdddddd);
   Tab *t = &a->tabs[a->active];
   int lineh = font ? font->ascent + font->descent : 16;
   int y = 46;
