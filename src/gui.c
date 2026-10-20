@@ -246,6 +246,8 @@ int gui_run(App *a) {
   gc = XCreateGC(dpy, win, 0, NULL);
   font = XLoadQueryFont(dpy, "fixed");
   XMapWindow(dpy, win);
+  /* Send the map request before poll() waits on the X connection. */
+  XFlush(dpy);
   for (size_t i = 0; i < a->count; i++) {
     fcntl(a->tabs[i].output_fd, F_SETFL, O_NONBLOCK);
     fcntl(a->tabs[i].status_fd, F_SETFL, O_NONBLOCK);
