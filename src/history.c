@@ -1,14 +1,26 @@
 #include "terminator.h"
+#include <errno.h>
 #include <string.h>
 
+/* The same ring layout works in either heap memory or MAP_SHARED memory. */
 void history_init(SharedHistory *h, int process_shared) {
   memset(h, 0, sizeof(*h));
   (void)sem_init(&h->lock, process_shared ? 1 : 0, 1);
 }
+
+static int history_lock(SharedHistory *h) {
+  int result;
+  do {
+    result = sem_wait(&h->lock);
+  } while (result < 0 && errno == EINTR);
+  return result;
+}
+
 void history_add(SharedHistory *h, const char *line) {
   if (!h || !line || !*line)
     return;
-  sem_wait(&h->lock);
+  if (history_lock(h) < 0)
+    return;
   size_t i = h->next++ % TERM_HISTORY_CAP;
   strncpy(h->entries[i], line, TERM_LINE_MAX - 1);
   h->entries[i][TERM_LINE_MAX - 1] = '\0';
@@ -20,8 +32,10 @@ size_t history_snapshot(SharedHistory *h, char (*out)[TERM_LINE_MAX],
                         size_t cap) {
   if (!h || !out || !cap)
     return 0;
-  sem_wait(&h->lock);
+  if (history_lock(h) < 0)
+    return 0;
   size_t n = h->count < cap ? h->count : cap;
+  /* Copy oldest-to-newest while locked so callers never see a torn entry. */
   size_t start = (h->next + TERM_HISTORY_CAP - h->count) % TERM_HISTORY_CAP;
   if (h->count > n)
     start = (start + h->count - n) % TERM_HISTORY_CAP;

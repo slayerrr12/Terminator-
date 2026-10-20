@@ -19,6 +19,7 @@ static int add_token(Tokens *tokens, const char *text, size_t length) {
 }
 
 int shell_is_complete(const char *text) {
+  /* Keep collecting input while quotes, escapes, or $(...) remain open. */
   char quote = 0;
   int escaped = 0, depth = 0, backtick = 0;
   for (const char *s = text; *s; ++s) {
@@ -63,7 +64,8 @@ int shell_lex(const char *text, Tokens *tokens, char **error) {
       ++s;
     if (!*s)
       break;
-    if (*s == '|' || *s == '<' || *s == '>') {
+    /* Operators split words only when they are outside quotes/substitutions. */
+    if (*s == '|' || *s == '<' || *s == '>' || *s == '&') {
       size_t n = (*s == '>' && s[1] == '>') ? 2 : 1;
       if (add_token(tokens, s, n))
         goto oom;
@@ -117,7 +119,7 @@ int shell_lex(const char *text, Tokens *tokens, char **error) {
         continue;
       }
       if (!depth && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '|' ||
-                     *s == '<' || *s == '>'))
+                     *s == '<' || *s == '>' || *s == '&'))
         break;
       ++s;
     }
@@ -143,8 +145,11 @@ oom:
 
 int shell_parse(const char *text, Tokens *tokens, Pipeline *out, char **error) {
   memset(out, 0, sizeof(*out));
-  if (shell_lex(text, tokens, error) < 0)
+  out->source = strdup(text);
+  if (!out->source)
     return -1;
+  if (shell_lex(text, tokens, error) < 0)
+    goto malformed;
   size_t capacity = 0;
   for (size_t i = 0; i < tokens->count;) {
     if (out->count == capacity) {
@@ -157,7 +162,8 @@ int shell_parse(const char *text, Tokens *tokens, Pipeline *out, char **error) {
     }
     SimpleCommand *command = &out->commands[out->count++];
     memset(command, 0, sizeof(*command));
-    while (i < tokens->count && strcmp(tokens->items[i], "|")) {
+    while (i < tokens->count && strcmp(tokens->items[i], "|") &&
+           strcmp(tokens->items[i], "&")) {
       char *token = tokens->items[i++];
       if (!strcmp(token, "<") || !strcmp(token, ">") || !strcmp(token, ">>")) {
         int input = !strcmp(token, "<");
@@ -188,11 +194,22 @@ int shell_parse(const char *text, Tokens *tokens, Pipeline *out, char **error) {
       command->argv[command->argc] = NULL;
     }
     if (i < tokens->count) {
+      int background = !strcmp(tokens->items[i], "&");
       ++i;
+      if (background) {
+        /* This shell supports one trailing '&' for a whole pipeline. */
+        if (i != tokens->count) {
+          if (error)
+            *error = strdup("'&' is only supported at the end of a command");
+          goto malformed;
+        }
+        out->background = 1;
+      }
       if (i == tokens->count) {
-        if (error)
+        if (!background && error)
           *error = strdup("pipeline requires a command after '|'");
-        goto malformed;
+        if (!background)
+          goto malformed;
       }
     }
     if (!command->argc) {
@@ -235,6 +252,7 @@ void shell_pipeline_free(Pipeline *pipeline) {
     free(command->output_path);
   }
   free(pipeline->commands);
+  free(pipeline->source);
   memset(pipeline, 0, sizeof(*pipeline));
 }
 #include "shell.h"

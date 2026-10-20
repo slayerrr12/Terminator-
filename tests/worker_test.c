@@ -1,6 +1,8 @@
 #include "terminator.h"
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,17 +87,18 @@ static void run_case(int process_mode) {
   Harness h = start_worker(process_mode);
   char dir[] = "/tmp/terminator-test-XXXXXX";
   assert(mkdtemp(dir));
-  char file[512], absent[520], history_file[512];
+  char file[512], absent[520], history_file[512], input_file[512];
   snprintf(file, sizeof(file), "%s/out.txt", dir);
   snprintf(absent, sizeof(absent), "%s/missing.txt", dir);
   snprintf(history_file, sizeof(history_file), "%s/history.txt", dir);
+  snprintf(input_file, sizeof(input_file), "%s/input.txt", dir);
   char script[512];
   snprintf(script, sizeof(script), "%s/source.txt", dir);
   FILE *sf = fopen(script, "w");
   assert(sf);
   fputs("echo sourced-command\n", sf);
   fclose(sf);
-  char commands[4096];
+  char commands[8192];
   snprintf(commands, sizeof(commands),
            "printf abc | wc -c\n"
            "echo '$HOME'\n"
@@ -121,6 +124,13 @@ static void run_case(int process_mode) {
            "printf ' world' >> %s\n"
            "cat < %s | wc -c\n"
            "cat < /terminator-file-that-does-not-exist > %s\n"
+           "cd %s\n"
+           "printf shared-input > %s\n"
+           "cat < %s > combined.txt\n"
+           "cat < %s > background-one.txt &\n"
+           "cat < %s > background-two.txt &\n"
+           "fg %%1\n"
+           "fg %%2\n"
            "echo $?\n"
            "notacommand\n"
            "source %s\n"
@@ -129,7 +139,8 @@ static void run_case(int process_mode) {
            "cd /tmp\n"
            "history\n"
            "exit\n",
-           dir, file, file, file, absent, script, dir);
+           dir, file, file, file, absent, dir, input_file, input_file,
+           input_file, input_file, script, dir);
   size_t len = strlen(commands);
   assert(write(h.in, commands, len) == (ssize_t)len);
   close(h.in);
@@ -191,10 +202,23 @@ static void run_case(int process_mode) {
   fclose(f);
   assert(!strcmp(contents, "hello world"));
   assert(access(absent, F_OK) != 0);
+  char path[520];
+  const char *copied_files[] = {"combined.txt", "background-one.txt",
+                                "background-two.txt"};
+  for (size_t i = 0; i < sizeof(copied_files) / sizeof(copied_files[0]); ++i) {
+    char copied[512] = {0};
+    snprintf(path, sizeof(path), "%s/%s", dir, copied_files[i]);
+    FILE *copy = fopen(path, "r");
+    assert(copy);
+    assert(fread(copied, 1, sizeof(copied) - 1, copy) == 12);
+    fclose(copy);
+    assert(!strcmp(copied, "shared-input"));
+    unlink(path);
+  }
+  unlink(input_file);
   unlink(file);
   unlink(script);
   unlink(history_file);
-  char path[520];
   snprintf(path, sizeof(path), "%s/one.txt", dir);
   unlink(path);
   snprintf(path, sizeof(path), "%s/two.txt", dir);
@@ -329,6 +353,127 @@ static void test_interrupt_is_tab_scoped(int process_mode) {
   munmap(other.foreground, sizeof(*other.foreground));
 }
 
+static int wait_for_foreground(Harness *h) {
+  struct timespec delay = {.tv_sec = 0, .tv_nsec = 10000000};
+  for (int i = 0; i < 200; ++i) {
+    int pgid = atomic_load(&h->foreground->pgid);
+    if (pgid > 0)
+      return pgid;
+    nanosleep(&delay, NULL);
+  }
+  return 0;
+}
+
+static void test_job_control(int process_mode) {
+  Harness h = start_worker(process_mode);
+  assert(write(h.in, "sleep 10\n", 9) == 9);
+  int pgid = wait_for_foreground(&h);
+  assert(pgid > 0 && kill(-pgid, SIGTSTP) == 0);
+  WorkerStatus status;
+  assert(read(h.status, &status, sizeof(status)) == (ssize_t)sizeof(status));
+  assert(status.status == 128 + SIGTSTP);
+
+  const char control[] = "jobs\nbg %1\n";
+  assert(write(h.in, control, sizeof(control) - 1) ==
+         (ssize_t)(sizeof(control) - 1));
+  assert(read(h.status, &status, sizeof(status)) == (ssize_t)sizeof(status));
+  assert(status.status == 0);
+  assert(read(h.status, &status, sizeof(status)) == (ssize_t)sizeof(status));
+  assert(status.status == 0);
+
+  assert(write(h.in, "fg %1\n", 6) == 6);
+  pgid = wait_for_foreground(&h);
+  assert(pgid > 0 && kill(-pgid, SIGINT) == 0);
+  assert(read(h.status, &status, sizeof(status)) == (ssize_t)sizeof(status));
+  assert(status.status == 128 + SIGINT);
+  assert(write(h.in, "exit\n", 5) == 5);
+  close(h.in);
+  char output[4096] = {0};
+  size_t used = 0;
+  for (;;) {
+    ssize_t n = read(h.out, output + used, sizeof(output) - used - 1);
+    if (!n)
+      break;
+    assert(n > 0);
+    used += (size_t)n;
+  }
+  close(h.out);
+  close(h.status);
+  if (process_mode) {
+    int child_status;
+    assert(waitpid(h.pid, &child_status, 0) == h.pid &&
+           WIFEXITED(child_status));
+  } else {
+    assert(pthread_join(h.thread, NULL) == 0);
+  }
+  assert(strstr(output, "Stopped"));
+  assert(strstr(output, "sleep 10"));
+  assert(strstr(output, "&"));
+  sem_destroy(&h.history->lock);
+  munmap(h.history, sizeof(*h.history));
+  munmap(h.foreground, sizeof(*h.foreground));
+}
+
+static void test_multiwatch_interrupt(int process_mode) {
+  Harness h = start_worker(process_mode);
+  assert(fcntl(h.out, F_SETFL, O_NONBLOCK) == 0);
+  const char command[] = "multiWatch [\"echo watched\", \"echo second\"]\n";
+  assert(write(h.in, command, sizeof(command) - 1) ==
+         (ssize_t)(sizeof(command) - 1));
+  char output[4096] = {0};
+  size_t used = 0;
+  int pgid = 0;
+  struct timespec delay = {.tv_sec = 0, .tv_nsec = 10000000};
+  for (int i = 0; i < 300 && (!strstr(output, "watched") ||
+                              !strstr(output, "\"echo watched\"") ||
+                              !strstr(output, "\"echo second\""));
+       ++i) {
+    ssize_t n = read(h.out, output + used, sizeof(output) - used - 1);
+    if (n > 0)
+      used += (size_t)n;
+    pgid = atomic_load(&h.foreground->pgid);
+    nanosleep(&delay, NULL);
+  }
+  assert(strstr(output, "watched"));
+  assert(strstr(output, "\"echo second\""));
+  assert(pgid > 0 && kill(-pgid, SIGINT) == 0);
+  WorkerStatus status;
+  assert(read(h.status, &status, sizeof(status)) == (ssize_t)sizeof(status));
+  assert(status.status == 128 + SIGINT);
+  assert(write(h.in, "exit\n", 5) == 5);
+  close(h.in);
+  for (;;) {
+    struct pollfd ready = {.fd = h.out, .events = POLLIN | POLLHUP};
+    int poll_result = poll(&ready, 1, 1000);
+    assert(poll_result >= 0);
+    if (!poll_result)
+      continue;
+    ssize_t n = read(h.out, output + used, sizeof(output) - used - 1);
+    if (!n)
+      break;
+    if (n < 0 && errno == EAGAIN)
+      continue;
+    if (n < 0 && errno == EINTR)
+      continue;
+    assert(n > 0);
+    used += (size_t)n;
+  }
+  close(h.out);
+  close(h.status);
+  if (process_mode) {
+    int child_status;
+    assert(waitpid(h.pid, &child_status, 0) == h.pid &&
+           WIFEXITED(child_status));
+  } else {
+    assert(pthread_join(h.thread, NULL) == 0);
+  }
+  assert(strstr(output, "\"echo watched\""));
+  assert(strstr(output, "\"echo second\""));
+  sem_destroy(&h.history->lock);
+  munmap(h.history, sizeof(*h.history));
+  munmap(h.foreground, sizeof(*h.foreground));
+}
+
 int main(void) {
   run_case(0);
   run_case(1);
@@ -336,6 +481,10 @@ int main(void) {
   test_two_tabs(1);
   test_interrupt_is_tab_scoped(0);
   test_interrupt_is_tab_scoped(1);
+  test_job_control(0);
+  test_job_control(1);
+  test_multiwatch_interrupt(0);
+  test_multiwatch_interrupt(1);
   puts("worker integration tests passed (thread and process modes)");
   return 0;
 }

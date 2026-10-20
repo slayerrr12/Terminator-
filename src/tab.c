@@ -10,6 +10,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/*
+ * Each tab has GUI-owned ends for input, output, and status pipes. In thread
+ * mode, the worker uses the other ends in the same process; in process mode,
+ * the worker child owns them. Keep these descriptors local to the tab.
+ */
 static int make_pipe(int p[2]) {
   if (pipe(p) < 0)
     return -1;
@@ -90,6 +95,7 @@ int app_add_tab(App *app) {
   } else {
     pid_t pid = fork();
     if (pid == 0) {
+      /* The worker must not keep GUI connections or other tabs' pipe ends. */
       if (app->x_fd >= 0)
         close(app->x_fd);
       for (size_t k = 0; k < app->count; k++) {
@@ -145,6 +151,7 @@ void app_close_tab(App *app, size_t ix) {
   if (ix >= app->count)
     return;
   Tab *t = &app->tabs[ix];
+  /* Stop the active foreground group before joining or reaping its worker. */
   int pgid = atomic_load(&t->foreground->pgid);
   if (pgid > 0)
     (void)kill(-pgid, SIGTERM);

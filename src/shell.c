@@ -113,15 +113,33 @@ static int builtin_source(ShellContext *ctx, char **argv, int out) {
   return rc;
 }
 
+static int builtin_jobs(ShellContext *ctx, char **argv, int out) {
+  (void)argv;
+  return shell_jobs_list(ctx, out);
+}
+
+static int builtin_fg(ShellContext *ctx, char **argv, int out) {
+  return shell_job_foreground(ctx, argv, out);
+}
+
+static int builtin_bg(ShellContext *ctx, char **argv, int out) {
+  return shell_job_background(ctx, argv, out);
+}
+
 typedef int (*BuiltinHandler)(ShellContext *, char **, int);
 typedef struct {
   const char *name;
   BuiltinHandler handler;
 } BuiltinEntry;
-static const BuiltinEntry builtins[] = {{"cd", builtin_cd},
-                                        {"exit", builtin_exit},
-                                        {"history", builtin_history},
-                                        {"source", builtin_source}};
+static const BuiltinEntry builtins[] = {
+    {"cd", builtin_cd},
+    {"exit", builtin_exit},
+    {"history", builtin_history},
+    {"jobs", builtin_jobs},
+    {"fg", builtin_fg},
+    {"bg", builtin_bg},
+    {"multiWatch", shell_builtin_multiwatch},
+    {"source", builtin_source}};
 
 int shell_builtin(ShellContext *ctx, char **argv, int out) {
   if (!argv || !argv[0])
@@ -185,6 +203,7 @@ void worker_run(int input_fd, int output_fd, int status_fd,
     } else if (n + 1 < sizeof(line))
       line[n++] = ch;
   }
+  shell_jobs_cleanup(&ctx);
   close(input_fd);
   close(output_fd);
   close(status_fd);

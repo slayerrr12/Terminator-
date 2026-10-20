@@ -10,16 +10,33 @@ typedef struct {
   char *output_path;
   int append;
 } SimpleCommand;
+/* A parsed command line: one or more stages connected by pipes. */
 typedef struct {
   SimpleCommand *commands;
   size_t count;
+  int background;
+  char *source;
 } Pipeline;
+#define TERM_MAX_JOBS 64
+/* Job state belongs to one shell tab; pgid controls every process in a job. */
+typedef enum { JOB_UNUSED, JOB_RUNNING, JOB_STOPPED, JOB_DONE } JobState;
+typedef struct {
+  int id;
+  pid_t pgid;
+  pid_t last_pid;
+  JobState state;
+  char command[TERM_LINE_MAX];
+} ShellJob;
+/* Per-tab shell state. cwd is logical and never changes the GUI's directory. */
 typedef struct {
   char cwd[4096];
   int last_status;
   int should_exit;
+  int next_job_id;
+  pid_t process_group;
   SharedHistory *history;
   SharedForeground *foreground;
+  ShellJob jobs[TERM_MAX_JOBS];
 } ShellContext;
 typedef struct {
   char **items;
@@ -35,4 +52,9 @@ int shell_run_line(ShellContext *ctx, const char *line, int output_fd);
 int shell_expand_word(ShellContext *ctx, const char *input, char **out,
                       int output_fd, int *glob_eligible);
 int shell_builtin(ShellContext *ctx, char **argv, int output_fd);
+int shell_builtin_multiwatch(ShellContext *ctx, char **argv, int output_fd);
+void shell_jobs_cleanup(ShellContext *ctx);
+int shell_jobs_list(ShellContext *ctx, int output_fd);
+int shell_job_foreground(ShellContext *ctx, char **argv, int output_fd);
+int shell_job_background(ShellContext *ctx, char **argv, int output_fd);
 #endif

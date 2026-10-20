@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Xlib and all per-tab drawing stay on this one GUI thread. */
 static Display *dpy;
 static Window win;
 static GC gc;
@@ -161,6 +162,14 @@ static void handle_key(App *a, XKeyEvent *e) {
     }
     return;
   }
+  if (ctrl && k == XK_z) {
+    int pgid = atomic_load(&t->foreground->pgid);
+    if (pgid > 0) {
+      (void)kill(-pgid, SIGTSTP);
+      add_text(t, "^Z\n", 3);
+    }
+    return;
+  }
   if (ctrl && k == XK_d) {
     if (!t->input_len && !t->multiline_len) {
       app_close_tab(a, a->active);
@@ -256,6 +265,7 @@ int gui_run(App *a) {
       map[nf] = i;
       kind[nf++] = 2;
     }
+    /* Sleep until X11 or a worker pipe is ready; the GUI does not spin. */
     int pr = poll(pf, nf, -1);
     if (pr < 0) {
       if (errno == EINTR && terminator_stopping)
