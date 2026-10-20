@@ -18,32 +18,103 @@ static GC gc;
 static XFontStruct *font;
 static int width = 900, height = 600;
 static Atom wm_delete;
-static void add_text(Tab *t, const char *s, size_t n) {
-  while (n) {
-    const char *nl = memchr(s, '\n', n);
-    size_t z = nl ? (size_t)(nl - s) : n;
-    if (t->line_count == t->line_cap) {
-      size_t c = t->line_cap ? t->line_cap * 2 : 64;
-      char **p = realloc(t->lines, c * sizeof(*p));
-      if (!p)
-        return;
-      t->lines = p;
-      t->line_cap = c;
-    }
-    char *line = strndup(s, z);
-    if (!line)
-      return;
-    if (t->line_count >= 4000) {
-      free(t->lines[0]);
-      memmove(t->lines, t->lines + 1, (t->line_count - 1) * sizeof(*t->lines));
-      t->line_count--;
-    }
-    t->lines[t->line_count++] = line;
-    if (!nl)
-      break;
-    s = nl + 1;
-    n -= z + 1;
+static int add_line(Tab *t) {
+  /* Bound per-tab scrollback while keeping the newest rows. */
+  if (t->line_count == 4000) {
+    free(t->lines[0]);
+    memmove(t->lines, t->lines + 1,
+            (t->line_count - 1) * sizeof(*t->lines));
+    t->line_count--;
+    if (t->scroll)
+      t->scroll--;
   }
+  if (t->line_count == t->line_cap) {
+    size_t cap = t->line_cap ? t->line_cap * 2 : 64;
+    char **lines = realloc(t->lines, cap * sizeof(*lines));
+    if (!lines)
+      return -1;
+    t->lines = lines;
+    t->line_cap = cap;
+  }
+  t->lines[t->line_count] = calloc(1, 1);
+  if (!t->lines[t->line_count])
+    return -1;
+  t->line_count++;
+  return 0;
+}
+
+static int append_to_current_line(Tab *t, const char *s, size_t n) {
+  if (!n)
+    return 0;
+  if (!t->line_count && add_line(t) < 0)
+    return -1;
+  char *line = t->lines[t->line_count - 1];
+  size_t old_len = strlen(line);
+  char *grown = realloc(line, old_len + n + 1);
+  if (!grown)
+    return -1;
+  memcpy(grown + old_len, s, n);
+  grown[old_len + n] = '\0';
+  t->lines[t->line_count - 1] = grown;
+  return 0;
+}
+
+/*
+ * Worker output arrives in arbitrary pipe-sized chunks. Append it to the
+ * current row so a line split across reads is displayed as one terminal line.
+ */
+static void add_text(Tab *t, const char *s, size_t n) {
+  size_t start = 0;
+  for (size_t i = 0; i <= n; i++) {
+    if (i < n && s[i] != '\n' && s[i] != '\r' && s[i] != '\b' &&
+        s[i] != '\t')
+      continue;
+    if (append_to_current_line(t, s + start, i - start) < 0)
+      return;
+    if (i == n)
+      break;
+    if (s[i] == '\n') {
+      if (add_line(t) < 0)
+        return;
+    } else if (s[i] == '\r') {
+      if (!t->line_count && add_line(t) < 0)
+        return;
+      t->lines[t->line_count - 1][0] = '\0';
+    } else if (s[i] == '\b') {
+      if (t->line_count) {
+        size_t len = strlen(t->lines[t->line_count - 1]);
+        if (len)
+          t->lines[t->line_count - 1][len - 1] = '\0';
+      }
+    } else {
+      size_t col = t->line_count ? strlen(t->lines[t->line_count - 1]) : 0;
+      size_t spaces = 8 - col % 8;
+      static const char blanks[] = "        ";
+      if (append_to_current_line(t, blanks, spaces) < 0)
+        return;
+    }
+    start = i + 1;
+  }
+}
+
+static void make_prompt(const Tab *t, char *prompt, size_t size) {
+  const char *user = getenv("USER");
+  char host[128] = "localhost";
+  if (!user || !*user)
+    user = "user";
+  if (gethostname(host, sizeof(host)) < 0)
+    strcpy(host, "localhost");
+  host[sizeof(host) - 1] = '\0';
+
+  const char *cwd = t->cwd;
+  const char *home = getenv("HOME");
+  char display_cwd[sizeof(t->cwd) + 2];
+  if (home && *home && !strncmp(cwd, home, strlen(home)) &&
+      (cwd[strlen(home)] == '\0' || cwd[strlen(home)] == '/')) {
+    snprintf(display_cwd, sizeof(display_cwd), "~%s", cwd + strlen(home));
+    cwd = display_cwd;
+  }
+  snprintf(prompt, size, "%s@%s:%s$ ", user, host, cwd);
 }
 static void draw(App *a) {
   if (!dpy)
@@ -51,9 +122,9 @@ static void draw(App *a) {
   XClearWindow(dpy, win);
   if (font)
     XSetFont(dpy, gc, font->fid);
-  XSetForeground(dpy, gc, 0xdddddd);
+  XSetForeground(dpy, gc, 0x4a2944);
   XFillRectangle(dpy, win, gc, 0, 0, (unsigned)width, 26);
-  XSetForeground(dpy, gc, 0x16191f);
+  XSetForeground(dpy, gc, 0xf2f2f2);
   int x = 10;
   for (size_t i = 0; i < a->count; i++) {
     char label[128];
@@ -64,31 +135,49 @@ static void draw(App *a) {
   }
   XDrawString(dpy, win, gc, width - 35, 18, "[+]", 3);
   /* Keep terminal output and the input prompt readable on the dark background. */
-  XSetForeground(dpy, gc, 0xdddddd);
+  XSetForeground(dpy, gc, 0xf2f2f2);
   Tab *t = &a->tabs[a->active];
-  int lineh = font ? font->ascent + font->descent : 16;
-  int y = 46;
-  int available = (height - 80) / lineh;
+  int lineh = font ? font->ascent + font->descent + 3 : 18;
+  const int top = 48;
+  int visible = (height - top - 10) / lineh;
+  if (visible < 1)
+    visible = 1;
+  int prompt_visible = !t->busy;
   size_t total = t->line_count;
-  size_t first = total > (size_t)available ? total - (size_t)available : 0;
-  if (t->scroll && first > t->scroll)
-    first -= t->scroll;
-  for (size_t i = first; i < total && y < height - 35; i++, y += lineh)
-    XDrawString(dpy, win, gc, 10, y, t->lines[i], (int)strlen(t->lines[i]));
-  char prompt[128];
-  snprintf(prompt, sizeof(prompt), "%s@terminator> ",
-           getenv("USER") ? getenv("USER") : "user");
-  if (t->multiline_len)
-    strcpy(prompt, "> ");
-  y = height - 12;
-  XDrawString(dpy, win, gc, 10, y, prompt, (int)strlen(prompt));
-  int px = 10 + (font ? XTextWidth(font, prompt, (int)strlen(prompt))
-                      : (int)strlen(prompt) * 8);
-  XDrawString(dpy, win, gc, px, y, t->input, (int)t->input_len);
-  int cx = px + (font ? XTextWidth(font, t->input, (int)t->cursor)
-                      : (int)t->cursor * 8);
-  XDrawLine(dpy, win, gc, cx, y - (font ? font->ascent : 10), cx,
-            y + (font ? font->descent : 3));
+  if (prompt_visible && total == 0)
+    total = 1;
+  size_t max_first = total > (size_t)visible ? total - (size_t)visible : 0;
+  size_t first = max_first > t->scroll ? max_first - t->scroll : 0;
+  int y = top;
+  for (size_t row = first; row < total && y < height - 5;
+       row++, y += lineh) {
+    const char *line = row < t->line_count ? t->lines[row] : "";
+    int line_x = 12;
+    if (line[0]) {
+      XDrawString(dpy, win, gc, line_x, y, line, (int)strlen(line));
+      line_x += font ? XTextWidth(font, line, (int)strlen(line))
+                     : (int)strlen(line) * 8;
+    }
+
+    /* Append the live prompt to the current row, like a shell prompt. */
+    if (prompt_visible && row + 1 == total) {
+      char prompt[sizeof(t->cwd) + 256];
+      if (t->multiline_len)
+        strcpy(prompt, "> ");
+      else
+        make_prompt(t, prompt, sizeof(prompt));
+      XDrawString(dpy, win, gc, line_x, y, prompt, (int)strlen(prompt));
+      int px = line_x + (font ? XTextWidth(font, prompt, (int)strlen(prompt))
+                              : (int)strlen(prompt) * 8);
+      XDrawString(dpy, win, gc, px, y, t->input, (int)t->input_len);
+      if (!t->scroll) {
+        int cx = px + (font ? XTextWidth(font, t->input, (int)t->cursor)
+                            : (int)t->cursor * 8);
+        XDrawLine(dpy, win, gc, cx, y - (font ? font->ascent : 10), cx,
+                  y + (font ? font->descent : 3));
+      }
+    }
+  }
   XFlush(dpy);
 }
 static void append_input(Tab *t, const char *s, size_t n) {
@@ -120,7 +209,11 @@ static void submit(App *a, Tab *t) {
     return;
   }
   int continuation = t->multiline_len > 0;
-  const char *prompt = continuation ? "> " : "user@terminator> ";
+  char prompt[sizeof(t->cwd) + 256];
+  if (continuation)
+    strcpy(prompt, "> ");
+  else
+    make_prompt(t, prompt, sizeof(prompt));
   add_text(t, prompt, strlen(prompt));
   add_text(t, t->input, t->input_len);
   add_text(t, "\n", 1);
@@ -216,6 +309,8 @@ static void handle_key(App *a, XKeyEvent *e) {
     t->input[t->input_len] = 0;
   }
   if (ctrl && k == XK_l) {
+    for (size_t i = 0; i < t->line_count; i++)
+      free(t->lines[i]);
     t->line_count = 0;
     t->scroll = 0;
   }
@@ -238,7 +333,7 @@ int gui_run(App *a) {
   a->x_fd = ConnectionNumber(dpy);
   win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 30, 30,
                             (unsigned)width, (unsigned)height, 1,
-                            BlackPixel(dpy, screen), BlackPixel(dpy, screen));
+                            BlackPixel(dpy, screen), 0x300a24);
   XStoreName(dpy, win, "Terminator");
   XSelectInput(dpy, win,
                ExposureMask | KeyPressMask | StructureNotifyMask |
@@ -246,7 +341,9 @@ int gui_run(App *a) {
   wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
   XSetWMProtocols(dpy, win, &wm_delete, 1);
   gc = XCreateGC(dpy, win, 0, NULL);
-  font = XLoadQueryFont(dpy, "fixed");
+  font = XLoadQueryFont(dpy, "9x15");
+  if (!font)
+    font = XLoadQueryFont(dpy, "fixed");
   XMapWindow(dpy, win);
   /* Send the map request before poll() waits on the X connection. */
   XFlush(dpy);
