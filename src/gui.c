@@ -11,7 +11,10 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Xlib and all per-tab drawing stay on this one GUI thread. */
+/*
+ * Owns the X11 window, keyboard input, tab bar, and visible scrollback. Shell
+ * workers never call Xlib; they send output and completion messages over pipes.
+ */
 static Display *dpy;
 static Window win;
 static GC gc;
@@ -236,6 +239,7 @@ static int write_command(int fd, const char *s, size_t n) {
   return 0;
 }
 static void submit(App *a, Tab *t) {
+  /* Save the visible command, then send a complete line to this tab's worker. */
   if (t->multiline_len + t->input_len + 2 >= TERM_LINE_MAX) {
     add_text(t, "terminator: input too long\n", 27);
     t->multiline_len = 0;
@@ -277,6 +281,7 @@ static void submit(App *a, Tab *t) {
   (void)a;
 }
 static void handle_key(App *a, XKeyEvent *e) {
+  /* Apply editing and control shortcuts to the currently selected tab. */
   Tab *t = &a->tabs[a->active];
   KeySym k;
   char buf[64];
@@ -354,6 +359,7 @@ static void handle_key(App *a, XKeyEvent *e) {
     append_input(t, buf, (size_t)n);
 }
 int gui_run(App *a) {
+  /* Poll X events and every tab's output/status pipes without busy-waiting. */
   dpy = XOpenDisplay(NULL);
   if (!dpy) {
     fprintf(stderr, "terminator: cannot open X display\n");

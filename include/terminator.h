@@ -12,9 +12,9 @@
 #define TERM_LINE_MAX 8192
 #define TERM_CWD_MAX 1024
 typedef struct {
-  int status;
-  int clear_screen;
-  char cwd[TERM_CWD_MAX];
+  int status;       /* Exit status of the command just handled. */
+  int clear_screen; /* GUI should clear this tab's scrollback when nonzero. */
+  char cwd[TERM_CWD_MAX]; /* Updated logical working directory. */
 } WorkerStatus;
 typedef struct {
   atomic_int pgid;

@@ -2,13 +2,14 @@
 #include <errno.h>
 #include <string.h>
 
-/* The same ring layout works in either heap memory or MAP_SHARED memory. */
+/* Bounded history ring usable from heap memory or MAP_SHARED process memory. */
 void history_init(SharedHistory *h, int process_shared) {
   memset(h, 0, sizeof(*h));
   (void)sem_init(&h->lock, process_shared ? 1 : 0, 1);
 }
 
 static int history_lock(SharedHistory *h) {
+  /* sem_wait can be interrupted by a signal; retry without losing the lock. */
   int result;
   do {
     result = sem_wait(&h->lock);

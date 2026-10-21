@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Converts shell text into tokens and pipeline structures. This module parses
+ * syntax and expands words; process creation is handled by executor.c.
+ */
 static int add_token(Tokens *tokens, const char *text, size_t length) {
   char *copy = malloc(length + 1);
   if (!copy)
@@ -18,8 +22,9 @@ static int add_token(Tokens *tokens, const char *text, size_t length) {
   return 0;
 }
 
+/* Return false while the GUI should keep collecting a multiline command. */
 int shell_is_complete(const char *text) {
-  /* Keep collecting input while quotes, escapes, or $(...) remain open. */
+  /* Track open quotes, escapes, backticks, and nested command substitutions. */
   char quote = 0;
   int escaped = 0, depth = 0, backtick = 0;
   for (const char *s = text; *s; ++s) {
@@ -54,6 +59,7 @@ int shell_is_complete(const char *text) {
   return !quote && !escaped && !backtick && depth == 0;
 }
 
+/* Split operators and words while keeping quoted operators inside their word. */
 int shell_lex(const char *text, Tokens *tokens, char **error) {
   memset(tokens, 0, sizeof(*tokens));
   if (error)
@@ -143,6 +149,7 @@ oom:
 #include <stdlib.h>
 #include <string.h>
 
+/* Assemble lexer tokens into commands, redirections, pipes, and trailing '&'. */
 int shell_parse(const char *text, Tokens *tokens, Pipeline *out, char **error) {
   memset(out, 0, sizeof(*out));
   out->source = strdup(text);
@@ -288,6 +295,7 @@ static int has_glob(const char *s) {
 }
 static int substitute(ShellContext *ctx, const char *cmd, size_t len,
                       char **value, int fd) {
+  /* Run $(...) in a child and capture its output for the containing word. */
   int p[2];
   if (pipe(p) < 0)
     return -1;
@@ -323,6 +331,7 @@ static int substitute(ShellContext *ctx, const char *cmd, size_t len,
 }
 int shell_expand_word(ShellContext *ctx, const char *in, char **out, int fd,
                       int *glob_eligible) {
+  /* Remove quote syntax and expand variables, substitutions, and escapes. */
   char *b = NULL;
   size_t n = 0, cap = 0;
   char q = 0;

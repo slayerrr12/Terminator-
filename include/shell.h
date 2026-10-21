@@ -29,8 +29,8 @@ typedef struct {
 } ShellJob;
 /* Per-tab shell state. cwd is logical and never changes the GUI's directory. */
 typedef struct {
-  char cwd[4096];
-  int last_status;
+  char cwd[4096]; /* Logical cwd; workers avoid changing the GUI cwd. */
+  int last_status; /* Status used by $? and the next worker response. */
   int should_exit;
   int clear_requested;
   int next_job_id;

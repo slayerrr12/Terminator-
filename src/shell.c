@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* Built-ins and the worker loop that connects one tab to the shell engine. */
 static int builtin_cd(ShellContext *ctx, char **argv, int out) {
   const char *dest = argv[1] ? argv[1] : getenv("HOME");
   if (!dest) {
@@ -73,6 +74,7 @@ static int builtin_history(ShellContext *ctx, char **argv, int out) {
 }
 
 static int builtin_source(ShellContext *ctx, char **argv, int out) {
+  /* Read and execute complete commands from a file in the tab's shell context. */
   if (!argv[1]) {
     dprintf(out, "terminator: source: filename required\n");
     return 2;
@@ -139,6 +141,7 @@ typedef struct {
   const char *name;
   BuiltinHandler handler;
 } BuiltinEntry;
+/* Keep built-in lookup table-driven so adding a command stays local. */
 static const BuiltinEntry builtins[] = {
     {"cd", builtin_cd},
     {"clear", builtin_clear},
@@ -168,6 +171,7 @@ int shell_builtin(ShellContext *ctx, char **argv, int out) {
 void worker_run(int input_fd, int output_fd, int status_fd,
                 SharedHistory *history, SharedForeground *foreground,
                 int tab_id, const char *cwd) {
+  /* Read newline-framed commands and report status/cwd back to the GUI. */
   ShellContext ctx = {0};
   ctx.history = history;
   ctx.foreground = foreground;

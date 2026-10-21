@@ -10,6 +10,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/*
+ * Applies redirections and launches parsed commands. Each pipeline gets one
+ * process group so foreground waits, Ctrl+C, job control, and cleanup agree.
+ */
 int redirection_open_input(const char *path, int error_fd) {
   int fd = open(path, O_RDONLY);
   if (fd < 0)
@@ -64,6 +68,7 @@ static int push_arg(char ***args, size_t *count, char *value) {
 }
 
 static int expand_command(ShellContext *ctx, SimpleCommand *command, int fd) {
+  /* Expand each argument and glob eligible words before execvp(). */
   char **argv = NULL;
   size_t argc = 0;
   for (size_t i = 0; i < command->argc; ++i) {
@@ -173,6 +178,7 @@ static int child_command(ShellContext *ctx, SimpleCommand *command, int out) {
 }
 
 static ShellJob *find_job(ShellContext *ctx, const char *arg) {
+  /* Accept either a numeric job id or %id; with no id, choose the newest. */
   int id = 0;
   if (arg && arg[0] == '%')
     arg++;
@@ -198,6 +204,7 @@ static ShellJob *find_job(ShellContext *ctx, const char *arg) {
 
 static ShellJob *add_job(ShellContext *ctx, pid_t pgid, JobState state,
                          pid_t last_pid, const char *command) {
+  /* Reuse completed slots so each tab's fixed-size job table stays bounded. */
   for (size_t i = 0; i < TERM_MAX_JOBS; ++i) {
     if (ctx->jobs[i].state == JOB_UNUSED || ctx->jobs[i].state == JOB_DONE) {
       ShellJob *job = &ctx->jobs[i];
@@ -468,6 +475,7 @@ int shell_execute(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
   if (pipeline->count == 1) {
     SimpleCommand *command = &pipeline->commands[0];
     const char *name = command->argv[0];
+    /* Stateful built-ins must run here so cd and job changes persist. */
     int parent_builtin = !pipeline->background &&
                          (!strcmp(name, "cd") || !strcmp(name, "exit") ||
                           !strcmp(name, "clear") ||
@@ -511,6 +519,7 @@ int shell_execute(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
 }
 
 int shell_run_line(ShellContext *ctx, const char *line, int output_fd) {
+  /* Parse, expand, execute, and release one complete input line. */
   Tokens tokens = {0};
   Pipeline pipeline = {0};
   char *error = NULL;

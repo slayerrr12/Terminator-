@@ -5,18 +5,21 @@
 #include <string.h>
 #include <sys/mman.h>
 
+/* Signal handlers set this flag; the GUI loop performs orderly shutdown. */
 volatile sig_atomic_t terminator_stopping = 0;
 static void stop_handler(int sig) {
   (void)sig;
   terminator_stopping = 1;
 }
 
+/* Initialize shared state, create the first tab, and hand control to X11. */
 int main(int argc, char **argv) {
   struct sigaction sa = {0};
   sa.sa_handler = stop_handler;
   sigemptyset(&sa.sa_mask);
   sigaction(SIGTERM, &sa, NULL);
   sigaction(SIGHUP, &sa, NULL);
+  /* Threads are the default; the assignment's flag selects worker processes. */
   ExecutionMode mode = MODE_THREADS;
   if (argc == 2 && !strcmp(argv[1], "useProcess=True"))
     mode = MODE_PROCESSES;

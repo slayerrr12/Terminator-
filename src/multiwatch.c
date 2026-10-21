@@ -10,6 +10,10 @@
 #include <time.h>
 #include <unistd.h>
 
+/*
+ * Runs a set of shell commands concurrently, captures each output stream, and
+ * restarts finished commands on the watch interval.
+ */
 typedef struct {
   const char *command;
   pid_t pid;

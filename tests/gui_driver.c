@@ -7,6 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Send X11 key/click events to verify commands and tab switching end to end. */
 static Window find_window(Display *d, Window root) {
   Window returned_root, parent, *children = NULL, found = 0;
   unsigned int count = 0;

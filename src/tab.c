@@ -25,6 +25,8 @@ static void close_on_exec(int fd) {
   if (flags >= 0)
     (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
+
+/* Create a tab's three communication pipes and start its shell worker. */
 int app_add_tab(App *app) {
   if (app->count >= TERM_MAX_TABS)
     return -1;
@@ -147,6 +149,7 @@ void *terminator_worker_thread(void *arg) {
              t->history, t->foreground, t->id, t->cwd);
   return NULL;
 }
+/* Stop the tab's active job, join/reap its worker, and release its buffers. */
 void app_close_tab(App *app, size_t ix) {
   if (ix >= app->count)
     return;

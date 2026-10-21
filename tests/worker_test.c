@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Exercise the shell worker protocol in both thread and process modes. */
 typedef struct {
   int in, out, status;
   SharedHistory *history;
