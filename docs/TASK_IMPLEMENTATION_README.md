@@ -12,6 +12,7 @@ requirements.
 include/
   terminator.h       App, Tab, worker, and shared-history data structures
   shell.h            Shell state, parsed commands, and job structures
+  scrollback.h       Per-tab scrollback and viewport interface
 src/
   main.c             Startup, execution-mode selection, and shutdown
   gui.c              X11 window, keyboard input, drawing, and event loop
@@ -21,7 +22,8 @@ src/
   executor.c         Redirection, pipelines, processes, and job control
   multiwatch.c       Concurrent command supervisor for multiWatch
   history.c          Shared in-memory command history
-tests/               Worker checks and an X11 interaction driver
+  scrollback.c       Bounded per-tab output history and scrolling behavior
+tests/               Worker, scrollback, and X11 interaction checks
 docs/                This guide, design notes, architecture, and roadmap
 Makefile             Build, run, clean, and test commands
 README.md            Dependencies, build instructions, features, and limits
@@ -105,8 +107,11 @@ other tabs' output.
 
 The GUI creates one X11 window and draws a tab bar, text output, the prompt,
 the editable input, and the input cursor. Each `Tab` stores its own input
-buffer and output lines. Clicking a tab changes which tab is drawn and receives
-keyboard input. The other tabs' workers continue running.
+buffer and up to 10,000 lines of output. Clicking a tab changes which tab is
+drawn and receives keyboard input. The other tabs' workers continue running.
+The mouse wheel and Page Up/Page Down scroll the active tab. If output arrives
+while the user is looking at earlier lines, the viewport stays on the same
+content. Returning to the bottom resumes following output.
 
 `XLookupString()` translates a key event into text and a `KeySym`. The GUI
 handles the editing keys and sends the full command to the selected worker
@@ -121,6 +126,8 @@ the same descriptors.
 
 - `src/gui.c`: `gui_run`, `handle_key_press`, `draw_terminal_window`,
   `submit_input`, and `append_output_text`.
+- `src/scrollback.c`: line storage, the 10,000-line limit, viewport position,
+  and follow-output behavior.
 - `src/tab.c`: `app_add_tab` and `app_close_tab`.
 - `include/terminator.h`: the `App` and `Tab` data structures.
 
@@ -337,7 +344,8 @@ followed by a separator line, as required by the assignment:
 
 Basic editing and control keys are implemented in `src/gui.c`, including
 left/right, Home/End, Ctrl+A, Ctrl+E, Ctrl+U, Ctrl+K, Ctrl+L, Ctrl+D, Ctrl+C,
-Ctrl+Z, and Ctrl+T. Up and Down scroll the visible output.
+Ctrl+Z, and Ctrl+T. Up and Down move through output in small steps. Page Up,
+Page Down, and the mouse wheel also scroll the active tab.
 
 The assignment's saved custom key bindings, Ctrl+W, command-history navigation,
 and X11 copy/paste are not implemented. Key definitions are currently handled

@@ -38,7 +38,9 @@ it. `make clean` removes the executable and generated build files.
 - Press **Ctrl+D** on an empty command line to close the current tab.
 - Press **Ctrl+C** to interrupt the selected tab's foreground job and **Ctrl+Z**
   to stop it.
-- Use **Up** and **Down** to scroll the displayed output.
+- Use **Up** and **Down** to move 10 lines at a time, **Page Up/Page Down** to
+  move by a screen, or the mouse wheel to move 3 lines per notch. Each tab
+  keeps up to 10,000 lines of output.
 
 ## Implemented features
 

@@ -59,6 +59,22 @@ static void click_tab(Display *d, Window w, int x) {
   usleep(50000);
 }
 
+static void wheel(Display *d, Window w, unsigned int direction) {
+  XEvent e = {0};
+  e.xbutton.type = ButtonPress;
+  e.xbutton.display = d;
+  e.xbutton.window = w;
+  e.xbutton.root = DefaultRootWindow(d);
+  e.xbutton.time = CurrentTime;
+  e.xbutton.x = 200;
+  e.xbutton.y = 100;
+  e.xbutton.button = direction;
+  e.xbutton.same_screen = True;
+  XSendEvent(d, w, True, ButtonPressMask, &e);
+  XFlush(d);
+  usleep(12000);
+}
+
 static KeySym symbol(char c) {
   if (c >= 'a' && c <= 'z')
     return (KeySym)(XK_a + c - 'a');
@@ -103,6 +119,12 @@ int main(int argument_count, char **arguments) {
   for (int i = 0; i < 100 && access("/tmp/terminator-gui-first", F_OK); ++i)
     usleep(50000);
   assert(access("/tmp/terminator-gui-first", F_OK) == 0);
+  type(d, w, "seq 1 500");
+  usleep(300000);
+  key(d, w, XK_Page_Up, 0);
+  wheel(d, w, Button4);
+  key(d, w, XK_Page_Down, 0);
+  wheel(d, w, Button5);
   key(d, w, XK_t, ControlMask);
   char command[512];
   assert(snprintf(command, sizeof(command), "touch %s", arguments[1]) > 0);

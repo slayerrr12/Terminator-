@@ -21,93 +21,13 @@ static GC gc;
 static XFontStruct *font;
 static int width = 900, height = 600;
 static Atom wm_delete;
-static int append_scrollback_line(Tab *tab) {
-  /* Bound per-tab scrollback while keeping the newest rows. */
-  if (tab->output_line_count == 4000) {
-    free(tab->output_lines[0]);
-    memmove(tab->output_lines, tab->output_lines + 1,
-            (tab->output_line_count - 1) * sizeof(*tab->output_lines));
-    tab->output_line_count--;
-    if (tab->scroll_offset)
-      tab->scroll_offset--;
-  }
-  if (tab->output_line_count == tab->output_line_capacity) {
-    size_t cap = tab->output_line_capacity ? tab->output_line_capacity * 2 : 64;
-    char **lines = realloc(tab->output_lines, cap * sizeof(*lines));
-    if (!lines)
-      return -1;
-    tab->output_lines = lines;
-    tab->output_line_capacity = cap;
-  }
-  tab->output_lines[tab->output_line_count] = calloc(1, 1);
-  if (!tab->output_lines[tab->output_line_count])
-    return -1;
-  tab->output_line_count++;
-  return 0;
-}
-
-static int append_to_current_scrollback_line(Tab *tab, const char *text,
-                                             size_t n) {
-  if (!n)
-    return 0;
-  if (!tab->output_line_count && append_scrollback_line(tab) < 0)
-    return -1;
-  char *line = tab->output_lines[tab->output_line_count - 1];
-  size_t old_len = strlen(line);
-  char *grown = realloc(line, old_len + n + 1);
-  if (!grown)
-    return -1;
-  memcpy(grown + old_len, text, n);
-  grown[old_len + n] = '\0';
-  tab->output_lines[tab->output_line_count - 1] = grown;
-  return 0;
-}
-
 static void clear_scrollback(Tab *tab) {
-  for (size_t i = 0; i < tab->output_line_count; i++)
-    free(tab->output_lines[i]);
-  tab->output_line_count = 0;
-  tab->scroll_offset = 0;
+  scrollback_clear(&tab->scrollback);
 }
 
-/*
- * Worker output arrives in arbitrary pipe-sized chunks. Append it to the
- * current row so output split across reads is displayed as one terminal line.
- */
-static void append_output_text(Tab *tab, const char *text, size_t n) {
-  size_t start = 0;
-  for (size_t i = 0; i <= n; i++) {
-    if (i < n && text[i] != '\n' && text[i] != '\r' && text[i] != '\b' &&
-        text[i] != '\t')
-      continue;
-    if (append_to_current_scrollback_line(tab, text + start, i - start) < 0)
-      return;
-    if (i == n)
-      break;
-    if (text[i] == '\n') {
-      if (append_scrollback_line(tab) < 0)
-        return;
-    } else if (text[i] == '\r') {
-      if (!tab->output_line_count && append_scrollback_line(tab) < 0)
-        return;
-      tab->output_lines[tab->output_line_count - 1][0] = '\0';
-    } else if (text[i] == '\b') {
-      if (tab->output_line_count) {
-        size_t len = strlen(tab->output_lines[tab->output_line_count - 1]);
-        if (len)
-          tab->output_lines[tab->output_line_count - 1][len - 1] = '\0';
-      }
-    } else {
-      size_t col = tab->output_line_count
-                       ? strlen(tab->output_lines[tab->output_line_count - 1])
-                       : 0;
-      size_t spaces = 8 - col % 8;
-      static const char blanks[] = "        ";
-      if (append_to_current_scrollback_line(tab, blanks, spaces) < 0)
-        return;
-    }
-    start = i + 1;
-  }
+/* Pipe reads can split text at any byte; the scrollback joins each chunk. */
+static void append_output_text(Tab *tab, const char *text, size_t length) {
+  (void)scrollback_append_text(&tab->scrollback, text, length);
 }
 
 static void build_shell_prompt(const Tab *tab, char *prompt, size_t size) {
@@ -144,6 +64,15 @@ static int calculate_add_tab_button_x(size_t count) {
   return 8 + (int)count * calculate_tab_width(count) + 4;
 }
 
+static int terminal_line_height(void) {
+  return font ? font->ascent + font->descent + 3 : 18;
+}
+
+static size_t terminal_visible_rows(void) {
+  int visible = (height - 54 - 10) / terminal_line_height();
+  return visible > 0 ? (size_t)visible : 1;
+}
+
 static void draw_terminal_window(App *app) {
   if (!dpy)
     return;
@@ -177,22 +106,18 @@ static void draw_terminal_window(App *app) {
    */
   XSetForeground(dpy, gc, 0xf2f2f2);
   Tab *tab = &app->tabs[app->active_tab];
-  int lineh = font ? font->ascent + font->descent + 3 : 18;
+  int lineh = terminal_line_height();
   const int top = 54;
-  int visible = (height - top - 10) / lineh;
-  if (visible < 1)
-    visible = 1;
+  size_t visible = terminal_visible_rows();
   int prompt_visible = !tab->command_is_running;
-  size_t total = tab->output_line_count;
+  size_t total = tab->scrollback.line_count;
   if (prompt_visible && total == 0)
     total = 1;
-  size_t max_first = total > (size_t)visible ? total - (size_t)visible : 0;
   size_t first =
-      max_first > tab->scroll_offset ? max_first - tab->scroll_offset : 0;
+      scrollback_first_visible(&tab->scrollback, visible);
   int y = top;
   for (size_t row = first; row < total && y < height - 5; row++, y += lineh) {
-    const char *line =
-        row < tab->output_line_count ? tab->output_lines[row] : "";
+    const char *line = scrollback_get_line(&tab->scrollback, row);
     int line_x = 12;
     if (line[0]) {
       XDrawString(dpy, win, gc, line_x, y, line, (int)strlen(line));
@@ -212,7 +137,7 @@ static void draw_terminal_window(App *app) {
                               : (int)strlen(prompt) * 8);
       XDrawString(dpy, win, gc, px, y, tab->input_buffer,
                   (int)tab->input_length);
-      if (!tab->scroll_offset) {
+      if (tab->scrollback.follows_output) {
         int cx = px + (font ? XTextWidth(font, tab->input_buffer,
                                          (int)tab->input_cursor)
                             : (int)tab->input_cursor * 8);
@@ -284,7 +209,6 @@ static void submit_input(App *app, Tab *tab) {
                              tab->multiline_length) < 0)
     append_output_text(tab, "terminator: tab worker is unavailable\n", 38);
   tab->command_is_running = 1;
-  tab->scroll_offset = 0;
   tab->multiline_length = 0;
   tab->multiline_buffer[0] = 0;
   tab->input_length = tab->input_cursor = 0;
@@ -362,13 +286,22 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
   if (ctrl && key_symbol == XK_l) {
     clear_scrollback(tab);
   }
-  if (key_symbol == XK_Up && tab->scroll_offset < tab->output_line_count)
-    tab->scroll_offset += 10;
-  if (key_symbol == XK_Down && tab->scroll_offset >= 10)
-    tab->scroll_offset -= 10;
+  size_t visible_rows = terminal_visible_rows();
+  if (key_symbol == XK_Up)
+    scrollback_scroll_up(&tab->scrollback, visible_rows, 10);
+  if (key_symbol == XK_Down)
+    scrollback_scroll_down(&tab->scrollback, visible_rows, 10);
+  if (key_symbol == XK_Page_Up)
+    scrollback_scroll_up(&tab->scrollback, visible_rows,
+                         visible_rows > 1 ? visible_rows - 1 : 1);
+  if (key_symbol == XK_Page_Down)
+    scrollback_scroll_down(&tab->scrollback, visible_rows,
+                           visible_rows > 1 ? visible_rows - 1 : 1);
   if (n > 0 && !ctrl && key_symbol != XK_BackSpace && key_symbol != XK_Return &&
       key_symbol != XK_Left && key_symbol != XK_Right && key_symbol != XK_Up &&
-      key_symbol != XK_Down && key_symbol != XK_Home && key_symbol != XK_End)
+      key_symbol != XK_Down && key_symbol != XK_Page_Up &&
+      key_symbol != XK_Page_Down && key_symbol != XK_Home &&
+      key_symbol != XK_End)
     insert_input_text(tab, buf, (size_t)n);
 }
 int gui_run(App *app) {
@@ -453,6 +386,16 @@ int gui_run(App *app) {
               if (ix < app->tab_count)
                 app->active_tab = ix;
             }
+            draw_terminal_window(app);
+          } else if (ev.xbutton.y >= 54 &&
+                     (ev.xbutton.button == Button4 ||
+                      ev.xbutton.button == Button5)) {
+            Tab *tab = &app->tabs[app->active_tab];
+            size_t visible_rows = terminal_visible_rows();
+            if (ev.xbutton.button == Button4)
+              scrollback_scroll_up(&tab->scrollback, visible_rows, 3);
+            else
+              scrollback_scroll_down(&tab->scrollback, visible_rows, 3);
             draw_terminal_window(app);
           }
         } else if (ev.type == ClientMessage &&

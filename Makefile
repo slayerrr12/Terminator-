@@ -8,7 +8,8 @@ LIBRARIES = -lX11 -pthread
 
 # All source files that make up the terminal application.
 SOURCES = src/main.c src/gui.c src/tab.c src/parser.c \
-	src/executor.c src/shell.c src/multiwatch.c src/history.c
+	src/executor.c src/shell.c src/multiwatch.c src/history.c \
+	src/scrollback.c
 
 # Source files needed by the shell worker test.
 WORKER_SOURCES = src/parser.c src/executor.c src/shell.c \
@@ -19,7 +20,8 @@ WORKER_SOURCES = src/parser.c src/executor.c src/shell.c \
 all: terminator
 
 # Compile and link every source file into one executable.
-terminator: $(SOURCES) include/terminator.h include/shell.h
+terminator: $(SOURCES) include/terminator.h include/shell.h \
+	include/scrollback.h
 	$(CC) $(CFLAGS) $(SOURCES) -o terminator $(LIBRARIES)
 
 # Build the application if needed, then start it.
@@ -36,4 +38,7 @@ test: terminator
 	$(CC) $(CFLAGS) tests/worker_test.c $(WORKER_SOURCES) \
 		-o build/worker_test -pthread
 	timeout 20s ./build/worker_test
+	$(CC) $(CFLAGS) tests/scrollback_test.c src/scrollback.c \
+		-o build/scrollback_test
+	./build/scrollback_test
 	./tests/integration.sh

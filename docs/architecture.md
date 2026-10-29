@@ -7,6 +7,7 @@ one main responsibility; related helpers stay together in their source file.
 include/
   terminator.h   Application, tab, history, and worker data structures
   shell.h        Parser, command, shell-state, and job structures
+  scrollback.h   Per-tab scrollback buffer and scrolling interface
 src/
   main.c         Startup, mode selection, shared history, and shutdown
   gui.c          X11 window, keyboard input, drawing, and event loop
@@ -16,7 +17,8 @@ src/
   executor.c     Redirection, pipelines, child processes, and jobs
   multiwatch.c   Concurrent command supervisor for multiWatch
   history.c      Shared in-memory command history
-tests/           Worker checks and X11 interaction driver
+  scrollback.c   Bounded per-tab output history and viewport tracking
+tests/           Worker, scrollback, and X11 interaction checks
 docs/            Task guide, architecture, design, and roadmap
 ```
 
@@ -28,7 +30,7 @@ flowchart LR
     B -->|command pipe| C[Tab worker]
     C --> D[parser.c]
     D --> E[executor.c]
-    E -->|output pipe| F[GUI scrollback]
+    E -->|output pipe| F[Tab scrollback]
     C -->|status pipe| B
 ```
 
@@ -45,6 +47,10 @@ flowchart LR
 
 The GUI polls the X11 connection and every tab's output and status pipes. It
 sleeps while there is no input or output to process. Only the GUI calls Xlib.
+Each tab owns its own 10,000-line scrollback ring. The GUI draws the active
+tab's visible slice and tracks its first visible line while output continues.
+The mouse wheel and Page Up/Page Down move that view; reaching the bottom turns
+follow-output back on.
 
 ## Execution modes
 

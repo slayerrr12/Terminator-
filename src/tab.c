@@ -71,6 +71,7 @@ int app_add_tab(App *app) {
   tab->gui_to_worker_fd = -1;
   tab->worker_to_gui_fd = -1;
   tab->status_from_worker_fd = -1;
+  scrollback_init(&tab->scrollback);
   memcpy(tab->working_directory, initial_working_directory,
          sizeof(tab->working_directory));
   tab->foreground = mmap(NULL, sizeof(*tab->foreground), PROT_READ | PROT_WRITE,
@@ -185,9 +186,7 @@ void app_close_tab(App *app, size_t tab_index) {
     close(tab->worker_to_gui_fd);
   if (tab->status_from_worker_fd >= 0)
     close(tab->status_from_worker_fd);
-  for (size_t i = 0; i < tab->output_line_count; i++)
-    free(tab->output_lines[i]);
-  free(tab->output_lines);
+  scrollback_destroy(&tab->scrollback);
   if (tab->foreground)
     munmap(tab->foreground, sizeof(*tab->foreground));
   if (tab_index + 1 < app->tab_count)

@@ -1,5 +1,6 @@
 #ifndef TERMINATOR_H
 #define TERMINATOR_H
+#include "scrollback.h"
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -60,10 +61,7 @@ typedef struct {
   char multiline_buffer[TERM_LINE_MAX];
   size_t multiline_length;
 
-  char **output_lines;
-  size_t output_line_count;
-  size_t output_line_capacity;
-  size_t scroll_offset;
+  Scrollback scrollback;
 } Tab;
 
 typedef struct {
