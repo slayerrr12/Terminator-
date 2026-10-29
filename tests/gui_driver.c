@@ -89,8 +89,8 @@ static void type(Display *d, Window w, const char *s) {
   key(d, w, XK_Return, 0);
 }
 
-int main(int argc, char **argv) {
-  assert(argc == 2);
+int main(int argument_count, char **arguments) {
+  assert(argument_count == 2);
   Display *d = XOpenDisplay(NULL);
   assert(d);
   Window w = 0;
@@ -105,11 +105,11 @@ int main(int argc, char **argv) {
   assert(access("/tmp/terminator-gui-first", F_OK) == 0);
   key(d, w, XK_t, ControlMask);
   char command[512];
-  assert(snprintf(command, sizeof(command), "touch %s", argv[1]) > 0);
+  assert(snprintf(command, sizeof(command), "touch %s", arguments[1]) > 0);
   type(d, w, command);
-  for (int i = 0; i < 100 && access(argv[1], F_OK); ++i)
+  for (int i = 0; i < 100 && access(arguments[1], F_OK); ++i)
     usleep(50000);
-  assert(access(argv[1], F_OK) == 0);
+  assert(access(arguments[1], F_OK) == 0);
   click_tab(d, w, 20);
   type(d, w, "touch /tmp/terminator-gui-tab-one");
   for (int i = 0; i < 100 && access("/tmp/terminator-gui-tab-one", F_OK); ++i)
@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
   key(d, w, XK_d, ControlMask);
   usleep(100000);
   unlink("/tmp/terminator-gui-first");
-  unlink(argv[1]);
+  unlink(arguments[1]);
   unlink("/tmp/terminator-gui-tab-one");
   unlink("/tmp/terminator-gui-tab-two");
   XCloseDisplay(d);

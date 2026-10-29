@@ -7,13 +7,13 @@
 
 /* Signal handlers set this flag; the GUI loop performs orderly shutdown. */
 volatile sig_atomic_t terminator_stopping = 0;
-static void stop_handler(int sig) {
-  (void)sig;
+static void stop_handler(int signal_number) {
+  (void)signal_number;
   terminator_stopping = 1;
 }
 
 /* Initialize shared state, create the first tab, and hand control to X11. */
-int main(int argc, char **argv) {
+int main(int argument_count, char **arguments) {
   struct sigaction sa = {0};
   sa.sa_handler = stop_handler;
   sigemptyset(&sa.sa_mask);
@@ -21,10 +21,10 @@ int main(int argc, char **argv) {
   sigaction(SIGHUP, &sa, NULL);
   /* Threads are the default; the assignment's flag selects worker processes. */
   ExecutionMode mode = MODE_THREADS;
-  if (argc == 2 && !strcmp(argv[1], "useProcess=True"))
+  if (argument_count == 2 && !strcmp(arguments[1], "useProcess=True"))
     mode = MODE_PROCESSES;
-  else if (argc > 1) {
-    fprintf(stderr, "usage: %s [useProcess=True]\n", argv[0]);
+  else if (argument_count > 1) {
+    fprintf(stderr, "usage: %s [useProcess=True]\n", arguments[0]);
     return 2;
   }
   App app = {0};
@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
     app_shutdown(&app);
     return 1;
   }
-  int rc = gui_run(&app);
+  int gui_status = gui_run(&app);
   app_shutdown(&app);
-  return rc;
+  return gui_status;
 }

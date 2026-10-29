@@ -51,15 +51,15 @@ typedef struct {
   int x_fd;
 } App;
 
-void history_init(SharedHistory *h, int process_shared);
-void history_add(SharedHistory *h, const char *line);
-size_t history_snapshot(SharedHistory *h, char (*out)[TERM_LINE_MAX],
-                        size_t cap);
+void history_init(SharedHistory *history, int process_shared);
+void history_add(SharedHistory *history, const char *line);
+size_t history_snapshot(SharedHistory *history, char (*snapshot)[TERM_LINE_MAX],
+                        size_t max_entries);
 int app_add_tab(App *app);
-void app_close_tab(App *app, size_t index);
+void app_close_tab(App *app, size_t tab_index);
 void app_shutdown(App *app);
 void worker_run(int input_fd, int output_fd, int status_fd,
                 SharedHistory *history, SharedForeground *foreground,
-                int tab_id, const char *cwd);
+                int tab_id, const char *working_directory);
 int gui_run(App *app);
 #endif

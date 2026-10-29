@@ -59,6 +59,7 @@ Terminator implements a shell subset rather than full Bash. It has no PTY or com
 
 ## Design notes
 
+- [Task-by-task implementation guide](docs/TASK_IMPLEMENTATION_README.md)
 - [Architecture](docs/architecture.md)
 - [Design decisions](docs/design.md)
 - [Roadmap](docs/roadmap.md)

@@ -21,91 +21,95 @@ static GC gc;
 static XFontStruct *font;
 static int width = 900, height = 600;
 static Atom wm_delete;
-static int add_line(Tab *t) {
+static int append_scrollback_line(Tab *tab) {
   /* Bound per-tab scrollback while keeping the newest rows. */
-  if (t->line_count == 4000) {
-    free(t->lines[0]);
-    memmove(t->lines, t->lines + 1, (t->line_count - 1) * sizeof(*t->lines));
-    t->line_count--;
-    if (t->scroll)
-      t->scroll--;
+  if (tab->line_count == 4000) {
+    free(tab->lines[0]);
+    memmove(tab->lines, tab->lines + 1,
+            (tab->line_count - 1) * sizeof(*tab->lines));
+    tab->line_count--;
+    if (tab->scroll)
+      tab->scroll--;
   }
-  if (t->line_count == t->line_cap) {
-    size_t cap = t->line_cap ? t->line_cap * 2 : 64;
-    char **lines = realloc(t->lines, cap * sizeof(*lines));
+  if (tab->line_count == tab->line_cap) {
+    size_t cap = tab->line_cap ? tab->line_cap * 2 : 64;
+    char **lines = realloc(tab->lines, cap * sizeof(*lines));
     if (!lines)
       return -1;
-    t->lines = lines;
-    t->line_cap = cap;
+    tab->lines = lines;
+    tab->line_cap = cap;
   }
-  t->lines[t->line_count] = calloc(1, 1);
-  if (!t->lines[t->line_count])
+  tab->lines[tab->line_count] = calloc(1, 1);
+  if (!tab->lines[tab->line_count])
     return -1;
-  t->line_count++;
+  tab->line_count++;
   return 0;
 }
 
-static int append_to_current_line(Tab *t, const char *s, size_t n) {
+static int append_to_current_scrollback_line(Tab *tab, const char *text,
+                                             size_t n) {
   if (!n)
     return 0;
-  if (!t->line_count && add_line(t) < 0)
+  if (!tab->line_count && append_scrollback_line(tab) < 0)
     return -1;
-  char *line = t->lines[t->line_count - 1];
+  char *line = tab->lines[tab->line_count - 1];
   size_t old_len = strlen(line);
   char *grown = realloc(line, old_len + n + 1);
   if (!grown)
     return -1;
-  memcpy(grown + old_len, s, n);
+  memcpy(grown + old_len, text, n);
   grown[old_len + n] = '\0';
-  t->lines[t->line_count - 1] = grown;
+  tab->lines[tab->line_count - 1] = grown;
   return 0;
 }
 
-static void clear_scrollback(Tab *t) {
-  for (size_t i = 0; i < t->line_count; i++)
-    free(t->lines[i]);
-  t->line_count = 0;
-  t->scroll = 0;
+static void clear_scrollback(Tab *tab) {
+  for (size_t i = 0; i < tab->line_count; i++)
+    free(tab->lines[i]);
+  tab->line_count = 0;
+  tab->scroll = 0;
 }
 
 /*
  * Worker output arrives in arbitrary pipe-sized chunks. Append it to the
- * current row so a line split across reads is displayed as one terminal line.
+ * current row so output split across reads is displayed as one terminal line.
  */
-static void add_text(Tab *t, const char *s, size_t n) {
+static void append_output_text(Tab *tab, const char *text, size_t n) {
   size_t start = 0;
   for (size_t i = 0; i <= n; i++) {
-    if (i < n && s[i] != '\n' && s[i] != '\r' && s[i] != '\b' && s[i] != '\t')
+    if (i < n && text[i] != '\n' && text[i] != '\r' && text[i] != '\b' &&
+        text[i] != '\t')
       continue;
-    if (append_to_current_line(t, s + start, i - start) < 0)
+    if (append_to_current_scrollback_line(tab, text + start, i - start) < 0)
       return;
     if (i == n)
       break;
-    if (s[i] == '\n') {
-      if (add_line(t) < 0)
+    if (text[i] == '\n') {
+      if (append_scrollback_line(tab) < 0)
         return;
-    } else if (s[i] == '\r') {
-      if (!t->line_count && add_line(t) < 0)
+    } else if (text[i] == '\r') {
+      if (!tab->line_count && append_scrollback_line(tab) < 0)
         return;
-      t->lines[t->line_count - 1][0] = '\0';
-    } else if (s[i] == '\b') {
-      if (t->line_count) {
-        size_t len = strlen(t->lines[t->line_count - 1]);
+      tab->lines[tab->line_count - 1][0] = '\0';
+    } else if (text[i] == '\b') {
+      if (tab->line_count) {
+        size_t len = strlen(tab->lines[tab->line_count - 1]);
         if (len)
-          t->lines[t->line_count - 1][len - 1] = '\0';
+          tab->lines[tab->line_count - 1][len - 1] = '\0';
       }
     } else {
-      size_t col = t->line_count ? strlen(t->lines[t->line_count - 1]) : 0;
+      size_t col =
+          tab->line_count ? strlen(tab->lines[tab->line_count - 1]) : 0;
       size_t spaces = 8 - col % 8;
       static const char blanks[] = "        ";
-      if (append_to_current_line(t, blanks, spaces) < 0)
+      if (append_to_current_scrollback_line(tab, blanks, spaces) < 0)
         return;
     }
     start = i + 1;
   }
 }
 
-static void make_prompt(const Tab *t, char *prompt, size_t size) {
+static void build_shell_prompt(const Tab *tab, char *prompt, size_t size) {
   const char *user = getenv("USER");
   char host[128] = "localhost";
   if (!user || !*user)
@@ -114,9 +118,9 @@ static void make_prompt(const Tab *t, char *prompt, size_t size) {
     strcpy(host, "localhost");
   host[sizeof(host) - 1] = '\0';
 
-  const char *cwd = t->cwd;
+  const char *cwd = tab->cwd;
   const char *home = getenv("HOME");
-  char display_cwd[sizeof(t->cwd) + 2];
+  char display_cwd[sizeof(tab->cwd) + 2];
   if (home && *home && !strncmp(cwd, home, strlen(home)) &&
       (cwd[strlen(home)] == '\0' || cwd[strlen(home)] == '/')) {
     snprintf(display_cwd, sizeof(display_cwd), "~%s", cwd + strlen(home));
@@ -125,7 +129,7 @@ static void make_prompt(const Tab *t, char *prompt, size_t size) {
   snprintf(prompt, size, "%s@%s:%s$ ", user, host, cwd);
 }
 
-static int tab_cell_width(size_t count) {
+static int calculate_tab_width(size_t count) {
   int area = width - 56;
   if (area < 1)
     area = 1;
@@ -135,11 +139,11 @@ static int tab_cell_width(size_t count) {
   return cell > 0 ? cell : 1;
 }
 
-static int tab_plus_x(size_t count) {
-  return 8 + (int)count * tab_cell_width(count) + 4;
+static int calculate_add_tab_button_x(size_t count) {
+  return 8 + (int)count * calculate_tab_width(count) + 4;
 }
 
-static void draw(App *a) {
+static void draw_terminal_window(App *app) {
   if (!dpy)
     return;
   XClearWindow(dpy, win);
@@ -148,10 +152,10 @@ static void draw(App *a) {
   XSetForeground(dpy, gc, 0x3b1d34);
   XFillRectangle(dpy, win, gc, 0, 0, (unsigned)width, 34);
   const int left = 8;
-  int tab_width = tab_cell_width(a->count);
-  for (size_t i = 0; i < a->count; i++) {
+  int tab_width = calculate_tab_width(app->count);
+  for (size_t i = 0; i < app->count; i++) {
     int x = left + (int)i * tab_width;
-    XSetForeground(dpy, gc, i == a->active ? 0x69435f : 0x4a2944);
+    XSetForeground(dpy, gc, i == app->active ? 0x69435f : 0x4a2944);
     int tab_fill_width = tab_width > 2 ? tab_width - 2 : 1;
     XFillRectangle(dpy, win, gc, x, 4, (unsigned)tab_fill_width, 26);
     XSetForeground(dpy, gc, 0xf2f2f2);
@@ -163,28 +167,29 @@ static void draw(App *a) {
       XDrawString(dpy, win, gc, x + (tab_width - label_width) / 2, 22, label,
                   (int)strlen(label));
   }
-  int plus_x = tab_plus_x(a->count);
+  int plus_x = calculate_add_tab_button_x(app->count);
   XSetForeground(dpy, gc, 0x4a2944);
   XFillRectangle(dpy, win, gc, plus_x, 4, 32, 26);
   XSetForeground(dpy, gc, 0xf2f2f2);
   XDrawString(dpy, win, gc, plus_x + 12, 22, "+", 1);
-  /* Keep terminal output and the input prompt readable on the dark background. */
+  /* Keep terminal output and the input prompt readable on the dark background.
+   */
   XSetForeground(dpy, gc, 0xf2f2f2);
-  Tab *t = &a->tabs[a->active];
+  Tab *tab = &app->tabs[app->active];
   int lineh = font ? font->ascent + font->descent + 3 : 18;
   const int top = 54;
   int visible = (height - top - 10) / lineh;
   if (visible < 1)
     visible = 1;
-  int prompt_visible = !t->busy;
-  size_t total = t->line_count;
+  int prompt_visible = !tab->busy;
+  size_t total = tab->line_count;
   if (prompt_visible && total == 0)
     total = 1;
   size_t max_first = total > (size_t)visible ? total - (size_t)visible : 0;
-  size_t first = max_first > t->scroll ? max_first - t->scroll : 0;
+  size_t first = max_first > tab->scroll ? max_first - tab->scroll : 0;
   int y = top;
   for (size_t row = first; row < total && y < height - 5; row++, y += lineh) {
-    const char *line = row < t->line_count ? t->lines[row] : "";
+    const char *line = row < tab->line_count ? tab->lines[row] : "";
     int line_x = 12;
     if (line[0]) {
       XDrawString(dpy, win, gc, line_x, y, line, (int)strlen(line));
@@ -194,18 +199,18 @@ static void draw(App *a) {
 
     /* Append the live prompt to the current row, like a shell prompt. */
     if (prompt_visible && row + 1 == total) {
-      char prompt[sizeof(t->cwd) + 256];
-      if (t->multiline_len)
+      char prompt[sizeof(tab->cwd) + 256];
+      if (tab->multiline_len)
         strcpy(prompt, "> ");
       else
-        make_prompt(t, prompt, sizeof(prompt));
+        build_shell_prompt(tab, prompt, sizeof(prompt));
       XDrawString(dpy, win, gc, line_x, y, prompt, (int)strlen(prompt));
       int px = line_x + (font ? XTextWidth(font, prompt, (int)strlen(prompt))
                               : (int)strlen(prompt) * 8);
-      XDrawString(dpy, win, gc, px, y, t->input, (int)t->input_len);
-      if (!t->scroll) {
-        int cx = px + (font ? XTextWidth(font, t->input, (int)t->cursor)
-                            : (int)t->cursor * 8);
+      XDrawString(dpy, win, gc, px, y, tab->input, (int)tab->input_len);
+      if (!tab->scroll) {
+        int cx = px + (font ? XTextWidth(font, tab->input, (int)tab->cursor)
+                            : (int)tab->cursor * 8);
         XDrawLine(dpy, win, gc, cx, y - (font ? font->ascent : 10), cx,
                   y + (font ? font->descent : 3));
       }
@@ -213,20 +218,21 @@ static void draw(App *a) {
   }
   XFlush(dpy);
 }
-static void append_input(Tab *t, const char *s, size_t n) {
-  if (n > TERM_LINE_MAX - 1 - t->input_len)
-    n = TERM_LINE_MAX - 1 - t->input_len;
-  memmove(t->input + t->cursor + n, t->input + t->cursor,
-          t->input_len - t->cursor);
-  memcpy(t->input + t->cursor, s, n);
-  t->input_len += n;
-  t->cursor += n;
-  t->input[t->input_len] = 0;
+static void insert_input_text(Tab *tab, const char *text, size_t n) {
+  if (n > TERM_LINE_MAX - 1 - tab->input_len)
+    n = TERM_LINE_MAX - 1 - tab->input_len;
+  memmove(tab->input + tab->cursor + n, tab->input + tab->cursor,
+          tab->input_len - tab->cursor);
+  memcpy(tab->input + tab->cursor, text, n);
+  tab->input_len += n;
+  tab->cursor += n;
+  tab->input[tab->input_len] = 0;
 }
-static int write_command(int fd, const char *s, size_t n) {
+static int send_command_to_worker(int file_descriptor, const char *text,
+                                  size_t n) {
   size_t sent = 0;
   while (sent < n) {
-    ssize_t w = write(fd, s + sent, n - sent);
+    ssize_t w = write(file_descriptor, text + sent, n - sent);
     if (w < 0 && errno == EINTR)
       continue;
     if (w <= 0)
@@ -235,127 +241,128 @@ static int write_command(int fd, const char *s, size_t n) {
   }
   return 0;
 }
-static void submit(App *a, Tab *t) {
+static void submit_input(App *app, Tab *tab) {
   /* Save the command in scrollback, then send it to this tab's worker. */
-  if (t->multiline_len + t->input_len + 2 >= TERM_LINE_MAX) {
-    add_text(t, "terminator: input too long\n", 27);
-    t->multiline_len = 0;
+  if (tab->multiline_len + tab->input_len + 2 >= TERM_LINE_MAX) {
+    append_output_text(tab, "terminator: input too long\n", 27);
+    tab->multiline_len = 0;
     return;
   }
-  int continuation = t->multiline_len > 0;
-  char prompt[sizeof(t->cwd) + 256];
+  int continuation = tab->multiline_len > 0;
+  char prompt[sizeof(tab->cwd) + 256];
   if (continuation)
     strcpy(prompt, "> ");
   else
-    make_prompt(t, prompt, sizeof(prompt));
-  add_text(t, prompt, strlen(prompt));
-  add_text(t, t->input, t->input_len);
-  add_text(t, "\n", 1);
-  memcpy(t->multiline + t->multiline_len, t->input, t->input_len);
-  t->multiline_len += t->input_len;
-  t->multiline[t->multiline_len] = 0;
-  if (!shell_is_complete(t->multiline)) {
-    size_t n = t->input_len;
-    if (n && t->input[n - 1] == '\\') {
-      t->multiline_len--;
-      t->multiline[t->multiline_len] = 0;
+    build_shell_prompt(tab, prompt, sizeof(prompt));
+  append_output_text(tab, prompt, strlen(prompt));
+  append_output_text(tab, tab->input, tab->input_len);
+  append_output_text(tab, "\n", 1);
+  memcpy(tab->multiline + tab->multiline_len, tab->input, tab->input_len);
+  tab->multiline_len += tab->input_len;
+  tab->multiline[tab->multiline_len] = 0;
+  if (!shell_is_complete(tab->multiline)) {
+    size_t n = tab->input_len;
+    if (n && tab->input[n - 1] == '\\') {
+      tab->multiline_len--;
+      tab->multiline[tab->multiline_len] = 0;
     } else
-      t->multiline[t->multiline_len++] = '\n';
-    t->input_len = t->cursor = 0;
-    t->input[0] = 0;
-    draw(a);
+      tab->multiline[tab->multiline_len++] = '\n';
+    tab->input_len = tab->cursor = 0;
+    tab->input[0] = 0;
+    draw_terminal_window(app);
     return;
   }
-  t->multiline[t->multiline_len++] = '\n';
-  if (write_command(t->input_fd, t->multiline, t->multiline_len) < 0)
-    add_text(t, "terminator: tab worker is unavailable\n", 38);
-  t->busy = 1;
-  t->scroll = 0;
-  t->multiline_len = 0;
-  t->multiline[0] = 0;
-  t->input_len = t->cursor = 0;
-  t->input[0] = 0;
-  (void)a;
+  tab->multiline[tab->multiline_len++] = '\n';
+  if (send_command_to_worker(tab->input_fd, tab->multiline,
+                             tab->multiline_len) < 0)
+    append_output_text(tab, "terminator: tab worker is unavailable\n", 38);
+  tab->busy = 1;
+  tab->scroll = 0;
+  tab->multiline_len = 0;
+  tab->multiline[0] = 0;
+  tab->input_len = tab->cursor = 0;
+  tab->input[0] = 0;
+  (void)app;
 }
-static void handle_key(App *a, XKeyEvent *e) {
+static void handle_key_press(App *app, XKeyEvent *key_event) {
   /* Apply editing and control shortcuts to the currently selected tab. */
-  Tab *t = &a->tabs[a->active];
-  KeySym k;
+  Tab *tab = &app->tabs[app->active];
+  KeySym key_symbol;
   char buf[64];
-  int n = XLookupString(e, buf, sizeof(buf), &k, NULL);
-  int ctrl = (e->state & ControlMask) != 0;
-  if (ctrl && k == XK_c) {
-    int pgid = atomic_load(&t->foreground->pgid);
+  int n = XLookupString(key_event, buf, sizeof(buf), &key_symbol, NULL);
+  int ctrl = (key_event->state & ControlMask) != 0;
+  if (ctrl && key_symbol == XK_c) {
+    int pgid = atomic_load(&tab->foreground->pgid);
     if (pgid > 0) {
       (void)kill(-pgid, SIGINT);
-      add_text(t, "^C\n", 3);
+      append_output_text(tab, "^C\n", 3);
     }
     return;
   }
-  if (ctrl && k == XK_z) {
-    int pgid = atomic_load(&t->foreground->pgid);
+  if (ctrl && key_symbol == XK_z) {
+    int pgid = atomic_load(&tab->foreground->pgid);
     if (pgid > 0) {
       (void)kill(-pgid, SIGTSTP);
-      add_text(t, "^Z\n", 3);
+      append_output_text(tab, "^Z\n", 3);
     }
     return;
   }
-  if (ctrl && k == XK_d) {
-    if (!t->input_len && !t->multiline_len) {
-      app_close_tab(a, a->active);
-      if (!a->count)
+  if (ctrl && key_symbol == XK_d) {
+    if (!tab->input_len && !tab->multiline_len) {
+      app_close_tab(app, app->active);
+      if (!app->count)
         terminator_stopping = 1;
     }
     return;
   }
-  if (ctrl && k == XK_t) {
-    if (app_add_tab(a) < 0)
-      add_text(t, "terminator: maximum tabs reached\n", 34);
+  if (ctrl && key_symbol == XK_t) {
+    if (app_add_tab(app) < 0)
+      append_output_text(tab, "terminator: maximum tabs reached\n", 34);
     return;
   }
-  if (k == XK_Return || k == XK_KP_Enter) {
-    submit(a, t);
+  if (key_symbol == XK_Return || key_symbol == XK_KP_Enter) {
+    submit_input(app, tab);
     return;
   }
-  if (k == XK_BackSpace && t->cursor) {
-    memmove(t->input + t->cursor - 1, t->input + t->cursor,
-            t->input_len - t->cursor);
-    t->cursor--;
-    t->input_len--;
-    t->input[t->input_len] = 0;
+  if (key_symbol == XK_BackSpace && tab->cursor) {
+    memmove(tab->input + tab->cursor - 1, tab->input + tab->cursor,
+            tab->input_len - tab->cursor);
+    tab->cursor--;
+    tab->input_len--;
+    tab->input[tab->input_len] = 0;
     return;
   }
-  if (k == XK_Left && t->cursor)
-    t->cursor--;
-  if (k == XK_Right && t->cursor < t->input_len)
-    t->cursor++;
-  if (k == XK_Home || (ctrl && k == XK_a))
-    t->cursor = 0;
-  if (k == XK_End || (ctrl && k == XK_e))
-    t->cursor = t->input_len;
-  if (ctrl && k == XK_u) {
-    memmove(t->input, t->input + t->cursor, t->input_len - t->cursor);
-    t->input_len -= t->cursor;
-    t->cursor = 0;
-    t->input[t->input_len] = 0;
+  if (key_symbol == XK_Left && tab->cursor)
+    tab->cursor--;
+  if (key_symbol == XK_Right && tab->cursor < tab->input_len)
+    tab->cursor++;
+  if (key_symbol == XK_Home || (ctrl && key_symbol == XK_a))
+    tab->cursor = 0;
+  if (key_symbol == XK_End || (ctrl && key_symbol == XK_e))
+    tab->cursor = tab->input_len;
+  if (ctrl && key_symbol == XK_u) {
+    memmove(tab->input, tab->input + tab->cursor, tab->input_len - tab->cursor);
+    tab->input_len -= tab->cursor;
+    tab->cursor = 0;
+    tab->input[tab->input_len] = 0;
   }
-  if (ctrl && k == XK_k) {
-    t->input_len = t->cursor;
-    t->input[t->input_len] = 0;
+  if (ctrl && key_symbol == XK_k) {
+    tab->input_len = tab->cursor;
+    tab->input[tab->input_len] = 0;
   }
-  if (ctrl && k == XK_l) {
-    clear_scrollback(t);
+  if (ctrl && key_symbol == XK_l) {
+    clear_scrollback(tab);
   }
-  if (k == XK_Up && t->scroll < t->line_count)
-    t->scroll += 10;
-  if (k == XK_Down && t->scroll >= 10)
-    t->scroll -= 10;
-  if (n > 0 && !ctrl && k != XK_BackSpace && k != XK_Return && k != XK_Left &&
-      k != XK_Right && k != XK_Up && k != XK_Down && k != XK_Home &&
-      k != XK_End)
-    append_input(t, buf, (size_t)n);
+  if (key_symbol == XK_Up && tab->scroll < tab->line_count)
+    tab->scroll += 10;
+  if (key_symbol == XK_Down && tab->scroll >= 10)
+    tab->scroll -= 10;
+  if (n > 0 && !ctrl && key_symbol != XK_BackSpace && key_symbol != XK_Return &&
+      key_symbol != XK_Left && key_symbol != XK_Right && key_symbol != XK_Up &&
+      key_symbol != XK_Down && key_symbol != XK_Home && key_symbol != XK_End)
+    insert_input_text(tab, buf, (size_t)n);
 }
-int gui_run(App *a) {
+int gui_run(App *app) {
   /* Poll X events and every tab's output/status pipes without busy-waiting. */
   dpy = XOpenDisplay(NULL);
   if (!dpy) {
@@ -363,7 +370,7 @@ int gui_run(App *a) {
     return 1;
   }
   int screen = DefaultScreen(dpy);
-  a->x_fd = ConnectionNumber(dpy);
+  app->x_fd = ConnectionNumber(dpy);
   win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 30, 30,
                             (unsigned)width, (unsigned)height, 1,
                             BlackPixel(dpy, screen), 0x300a24);
@@ -380,26 +387,26 @@ int gui_run(App *a) {
   XMapWindow(dpy, win);
   /* Send the map request before poll() waits on the X connection. */
   XFlush(dpy);
-  for (size_t i = 0; i < a->count; i++) {
-    fcntl(a->tabs[i].output_fd, F_SETFL, O_NONBLOCK);
-    fcntl(a->tabs[i].status_fd, F_SETFL, O_NONBLOCK);
+  for (size_t i = 0; i < app->count; i++) {
+    fcntl(app->tabs[i].output_fd, F_SETFL, O_NONBLOCK);
+    fcntl(app->tabs[i].status_fd, F_SETFL, O_NONBLOCK);
   }
   int xfd = ConnectionNumber(dpy);
-  while (a->count && !terminator_stopping) {
+  while (app->count && !terminator_stopping) {
     struct pollfd pf[1 + TERM_MAX_TABS * 2];
     size_t map[1 + TERM_MAX_TABS * 2];
     int kind[1 + TERM_MAX_TABS * 2];
     nfds_t nf = 1;
     pf[0] = (struct pollfd){xfd, POLLIN, 0};
-    for (size_t i = 0; i < a->count; i++) {
-      pf[nf] = (struct pollfd){a->tabs[i].output_fd, POLLIN | POLLHUP, 0};
+    for (size_t i = 0; i < app->count; i++) {
+      pf[nf] = (struct pollfd){app->tabs[i].output_fd, POLLIN | POLLHUP, 0};
       map[nf] = i;
       kind[nf++] = 1;
-      pf[nf] = (struct pollfd){a->tabs[i].status_fd, POLLIN, 0};
+      pf[nf] = (struct pollfd){app->tabs[i].status_fd, POLLIN, 0};
       map[nf] = i;
       kind[nf++] = 2;
     }
-    /* Sleep until X11 or a worker pipe is ready; the GUI does not spin. */
+    /* Sleep until X11 or app worker pipe is ready; the GUI does not spin. */
     int pr = poll(pf, nf, -1);
     if (pr < 0) {
       if (errno == EINTR && terminator_stopping)
@@ -413,30 +420,30 @@ int gui_run(App *a) {
         XEvent ev;
         XNextEvent(dpy, &ev);
         if (ev.type == Expose)
-          draw(a);
+          draw_terminal_window(app);
         else if (ev.type == ConfigureNotify) {
           width = ev.xconfigure.width;
           height = ev.xconfigure.height;
-          draw(a);
+          draw_terminal_window(app);
         } else if (ev.type == KeyPress) {
-          handle_key(a, &ev.xkey);
-          draw(a);
+          handle_key_press(app, &ev.xkey);
+          draw_terminal_window(app);
         } else if (ev.type == ButtonPress) {
           if (ev.xbutton.y < 34) {
-            int plus_x = tab_plus_x(a->count);
+            int plus_x = calculate_add_tab_button_x(app->count);
             if (ev.xbutton.x >= plus_x && ev.xbutton.x < plus_x + 32) {
-              if (app_add_tab(a) < 0)
-                add_text(&a->tabs[a->active],
-                         "terminator: maximum tabs reached\n", 34);
+              if (app_add_tab(app) < 0)
+                append_output_text(&app->tabs[app->active],
+                                   "terminator: maximum tabs reached\n", 34);
             } else {
-              int tab_width = tab_cell_width(a->count);
+              int tab_width = calculate_tab_width(app->count);
               size_t ix = ev.xbutton.x >= 8
                               ? (size_t)((ev.xbutton.x - 8) / tab_width)
-                              : a->count;
-              if (ix < a->count)
-                a->active = ix;
+                              : app->count;
+              if (ix < app->count)
+                app->active = ix;
             }
-            draw(a);
+            draw_terminal_window(app);
           }
         } else if (ev.type == ClientMessage &&
                    (Atom)ev.xclient.data.l[0] == wm_delete) {
@@ -447,32 +454,32 @@ int gui_run(App *a) {
     int close_tab[TERM_MAX_TABS] = {0};
     for (nfds_t i = 1; i < nf; i++)
       if (pf[i].revents) {
-        Tab *t = &a->tabs[map[i]];
+        Tab *tab = &app->tabs[map[i]];
         if (kind[i] == 1) {
           char b[2048];
           ssize_t n;
           while ((n = read(pf[i].fd, b, sizeof(b))) > 0)
-            add_text(t, b, (size_t)n);
+            append_output_text(tab, b, (size_t)n);
         } else {
           WorkerStatus message;
           ssize_t n;
           while ((n = read(pf[i].fd, &message, sizeof(message))) ==
                  (ssize_t)sizeof(message)) {
-            t->busy = 0;
+            tab->busy = 0;
             if (message.clear_screen)
-              clear_scrollback(t);
-            strncpy(t->cwd, message.cwd, sizeof(t->cwd) - 1);
-            t->cwd[sizeof(t->cwd) - 1] = 0;
+              clear_scrollback(tab);
+            strncpy(tab->cwd, message.cwd, sizeof(tab->cwd) - 1);
+            tab->cwd[sizeof(tab->cwd) - 1] = 0;
           }
         }
         if (pf[i].revents & (POLLHUP | POLLERR))
           close_tab[map[i]] = 1;
       }
-    for (size_t i = a->count; i > 0; i--)
+    for (size_t i = app->count; i > 0; i--)
       if (close_tab[i - 1])
-        app_close_tab(a, i - 1);
-    if (a->count)
-      draw(a);
+        app_close_tab(app, i - 1);
+    if (app->count)
+      draw_terminal_window(app);
   }
 done:
   if (font)

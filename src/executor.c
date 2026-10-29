@@ -57,7 +57,7 @@ int redirection_apply(const SimpleCommand *command, int error_fd) {
   }
   return 0;
 }
-static int push_arg(char ***args, size_t *count, char *value) {
+static int append_argument(char ***args, size_t *count, char *value) {
   char **next = realloc(*args, (*count + 2) * sizeof(*next));
   if (!next)
     return -1;
@@ -67,14 +67,16 @@ static int push_arg(char ***args, size_t *count, char *value) {
   return 0;
 }
 
-static int expand_command(ShellContext *ctx, SimpleCommand *command, int fd) {
+static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
+                                    int fd) {
   /* Expand each argument and glob eligible words before execvp(). */
-  char **argv = NULL;
-  size_t argc = 0;
-  for (size_t i = 0; i < command->argc; ++i) {
+  char **arguments = NULL;
+  size_t argument_count = 0;
+  for (size_t i = 0; i < command->argument_count; ++i) {
     char *word = NULL;
     int glob_eligible = 0;
-    if (shell_expand_word(ctx, command->argv[i], &word, fd, &glob_eligible) < 0)
+    if (shell_expand_word(shell, command->arguments[i], &word, fd,
+                          &glob_eligible) < 0)
       goto fail;
     glob_t matches = {0};
     char *pattern = NULL, *prefix = NULL;
@@ -82,7 +84,7 @@ static int expand_command(ShellContext *ctx, SimpleCommand *command, int fd) {
     if (glob_eligible) {
       if (word[0] == '/')
         pattern = strdup(word);
-      else if (asprintf(&prefix, "%s/", ctx->cwd) >= 0 &&
+      else if (asprintf(&prefix, "%s/", shell->cwd) >= 0 &&
                asprintf(&pattern, "%s%s", prefix, word) < 0) {
         free(prefix);
         prefix = NULL;
@@ -96,7 +98,7 @@ static int expand_command(ShellContext *ctx, SimpleCommand *command, int fd) {
         if (prefix && !strncmp(match, prefix, strlen(prefix)))
           match += strlen(prefix);
         char *copy = strdup(match);
-        if (!copy || push_arg(&argv, &argc, copy) < 0) {
+        if (!copy || append_argument(&arguments, &argument_count, copy) < 0) {
           free(copy);
           globfree(&matches);
           free(pattern);
@@ -106,7 +108,7 @@ static int expand_command(ShellContext *ctx, SimpleCommand *command, int fd) {
         }
       }
     } else {
-      if (push_arg(&argv, &argc, word) < 0) {
+      if (append_argument(&arguments, &argument_count, word) < 0) {
         free(word);
         globfree(&matches);
         free(pattern);
@@ -120,78 +122,80 @@ static int expand_command(ShellContext *ctx, SimpleCommand *command, int fd) {
     free(pattern);
     free(prefix);
   }
-  if (!argv)
-    argv = calloc(1, sizeof(*argv));
-  if (!argv)
+  if (!arguments)
+    arguments = calloc(1, sizeof(*arguments));
+  if (!arguments)
     goto fail;
-  for (size_t i = 0; i < command->argc; ++i)
-    free(command->argv[i]);
-  free(command->argv);
-  command->argv = argv;
-  command->argc = argc;
+  for (size_t i = 0; i < command->argument_count; ++i)
+    free(command->arguments[i]);
+  free(command->arguments);
+  command->arguments = arguments;
+  command->argument_count = argument_count;
   if (command->input_path) {
     char *expanded = NULL;
-    if (shell_expand_word(ctx, command->input_path, &expanded, fd, NULL) < 0)
+    if (shell_expand_word(shell, command->input_path, &expanded, fd, NULL) < 0)
       return -1;
     free(command->input_path);
     command->input_path = expanded;
   }
   if (command->output_path) {
     char *expanded = NULL;
-    if (shell_expand_word(ctx, command->output_path, &expanded, fd, NULL) < 0)
+    if (shell_expand_word(shell, command->output_path, &expanded, fd, NULL) < 0)
       return -1;
     free(command->output_path);
     command->output_path = expanded;
   }
   return 0;
 fail:
-  if (argv) {
-    for (size_t i = 0; i < argc; ++i)
-      free(argv[i]);
-    free(argv);
+  if (arguments) {
+    for (size_t i = 0; i < argument_count; ++i)
+      free(arguments[i]);
+    free(arguments);
   }
   dprintf(fd, "terminator: expansion failed\n");
   return -1;
 }
 
-static int child_command(ShellContext *ctx, SimpleCommand *command, int out) {
-  if (chdir(ctx->cwd) < 0) {
-    dprintf(out, "terminator: %s: %s\n", ctx->cwd, strerror(errno));
+static int run_command_in_child(ShellContext *shell, SimpleCommand *command,
+                                int output_fd) {
+  if (chdir(shell->cwd) < 0) {
+    dprintf(output_fd, "terminator: %s: %s\n", shell->cwd, strerror(errno));
     return 1;
   }
-  if (redirection_apply(command, out) < 0)
+  if (redirection_apply(command, output_fd) < 0)
     return 1;
-  int builtin = shell_builtin(ctx, command->argv, STDOUT_FILENO);
+  int builtin = shell_builtin(shell, command->arguments, STDOUT_FILENO);
   if (builtin >= 0)
     return builtin;
-  if (out > STDERR_FILENO)
-    close(out);
-  execvp(command->argv[0], command->argv);
+  if (output_fd > STDERR_FILENO)
+    close(output_fd);
+  execvp(command->arguments[0], command->arguments);
   int err = errno;
   if (err == ENOENT)
     dprintf(STDERR_FILENO, "terminator: %s: command not found\n",
-            command->argv[0]);
+            command->arguments[0]);
   else
-    dprintf(STDERR_FILENO, "terminator: %s: %s\n", command->argv[0],
+    dprintf(STDERR_FILENO, "terminator: %s: %s\n", command->arguments[0],
             strerror(err));
   return 127;
 }
 
-static ShellJob *find_job(ShellContext *ctx, const char *arg) {
+static ShellJob *find_job_by_id(ShellContext *shell,
+                                const char *job_identifier) {
   /* Accept either a numeric job id or %id; with no id, choose the newest. */
   int id = 0;
-  if (arg && arg[0] == '%')
-    arg++;
-  if (arg && *arg) {
+  if (job_identifier && job_identifier[0] == '%')
+    job_identifier++;
+  if (job_identifier && *job_identifier) {
     char *end = NULL;
-    long value = strtol(arg, &end, 10);
+    long value = strtol(job_identifier, &end, 10);
     if (!end || *end || value <= 0 || value > INT_MAX)
       return NULL;
     id = (int)value;
   }
   ShellJob *latest = NULL;
   for (size_t i = 0; i < TERM_MAX_JOBS; ++i) {
-    ShellJob *job = &ctx->jobs[i];
+    ShellJob *job = &shell->jobs[i];
     if (job->state == JOB_UNUSED || job->state == JOB_DONE)
       continue;
     if (id && job->id == id)
@@ -202,14 +206,15 @@ static ShellJob *find_job(ShellContext *ctx, const char *arg) {
   return latest;
 }
 
-static ShellJob *add_job(ShellContext *ctx, pid_t pgid, JobState state,
-                         pid_t last_pid, const char *command) {
+static ShellJob *record_job(ShellContext *shell, pid_t pgid, JobState state,
+                            pid_t last_pid, const char *command) {
   /* Reuse completed slots so each tab's fixed-size job table stays bounded. */
   for (size_t i = 0; i < TERM_MAX_JOBS; ++i) {
-    if (ctx->jobs[i].state == JOB_UNUSED || ctx->jobs[i].state == JOB_DONE) {
-      ShellJob *job = &ctx->jobs[i];
+    if (shell->jobs[i].state == JOB_UNUSED ||
+        shell->jobs[i].state == JOB_DONE) {
+      ShellJob *job = &shell->jobs[i];
       memset(job, 0, sizeof(*job));
-      job->id = ++ctx->next_job_id;
+      job->id = ++shell->next_job_id;
       job->pgid = pgid;
       job->last_pid = last_pid;
       job->state = state;
@@ -220,8 +225,9 @@ static ShellJob *add_job(ShellContext *ctx, pid_t pgid, JobState state,
   return NULL;
 }
 
-static int wait_for_group(ShellContext *ctx, pid_t pgid, pid_t last_pid,
-                          int output_fd, int job_id, const char *command) {
+static int wait_for_process_group(ShellContext *shell, pid_t pgid,
+                                  pid_t last_pid, int output_fd, int job_id,
+                                  const char *command) {
   /* Wait for any child in the pipeline's process group, including stops. */
   int result = 0;
   int last_status = 0;
@@ -240,10 +246,10 @@ static int wait_for_group(ShellContext *ctx, pid_t pgid, pid_t last_pid,
       if (WIFSTOPPED(status)) {
         ShellJob *job = NULL;
         for (size_t i = 0; i < TERM_MAX_JOBS; ++i)
-          if (ctx->jobs[i].id == job_id && ctx->jobs[i].state != JOB_UNUSED)
-            job = &ctx->jobs[i];
+          if (shell->jobs[i].id == job_id && shell->jobs[i].state != JOB_UNUSED)
+            job = &shell->jobs[i];
         if (!job)
-          job = add_job(ctx, pgid, JOB_STOPPED, last_pid, command);
+          job = record_job(shell, pgid, JOB_STOPPED, last_pid, command);
         if (job)
           job->state = JOB_STOPPED;
         dprintf(output_fd, "[%d]+ Stopped\t%s\n", job ? job->id : job_id,
@@ -265,12 +271,13 @@ static int wait_for_group(ShellContext *ctx, pid_t pgid, pid_t last_pid,
       break;
     }
   }
-  if (ctx->foreground)
-    atomic_store(&ctx->foreground->pgid, 0);
+  if (shell->foreground)
+    atomic_store(&shell->foreground->pgid, 0);
   return result;
 }
 
-static int run_pipeline(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
+static int execute_pipeline(ShellContext *shell, Pipeline *pipeline,
+                            int output_fd) {
   size_t count = pipeline->count;
   int (*pipes)[2] = count > 1 ? calloc(count - 1, sizeof(*pipes)) : NULL;
   pid_t *pids = calloc(count, sizeof(*pids));
@@ -293,14 +300,14 @@ static int run_pipeline(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
     }
   }
   size_t started = 0;
-  pid_t pgid = ctx->process_group, last_pid = 0;
+  pid_t pgid = shell->process_group, last_pid = 0;
   for (size_t i = 0; i < count; ++i) {
     pid_t pid = fork();
     if (pid == 0) {
       (void)setpgid(0, pgid ? pgid : 0);
-      ShellContext child_ctx = *ctx;
-      child_ctx.process_group = pgid ? pgid : getpid();
-      child_ctx.foreground = NULL;
+      ShellContext child_shell = *shell;
+      child_shell.process_group = pgid ? pgid : getpid();
+      child_shell.foreground = NULL;
       if (i)
         dup2(pipes[i - 1][0], STDIN_FILENO);
       else {
@@ -319,7 +326,9 @@ static int run_pipeline(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
         close(pipes[j][0]);
         close(pipes[j][1]);
       }
-      _exit(child_command(&child_ctx, &pipeline->commands[i], output_fd) & 255);
+      _exit(run_command_in_child(&child_shell, &pipeline->commands[i],
+                                 output_fd) &
+            255);
     }
     if (pid < 0) {
       dprintf(output_fd, "terminator: fork: %s\n", strerror(errno));
@@ -328,8 +337,8 @@ static int run_pipeline(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
     if (i == 0) {
       if (!pgid)
         pgid = pid;
-      if (ctx->foreground)
-        atomic_store(&ctx->foreground->pgid, (int)pgid);
+      if (shell->foreground)
+        atomic_store(&shell->foreground->pgid, (int)pgid);
     }
     (void)setpgid(pid, pgid);
     pids[started++] = pid;
@@ -344,15 +353,16 @@ static int run_pipeline(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
       (void)kill(-pgid, SIGTERM);
     for (size_t i = 0; i < started; ++i)
       (void)waitpid(pids[i], NULL, 0);
-    if (ctx->foreground)
-      atomic_store(&ctx->foreground->pgid, 0);
+    if (shell->foreground)
+      atomic_store(&shell->foreground->pgid, 0);
     free(pipes);
     free(pids);
     return 1;
   }
   int result;
   if (pipeline->background) {
-    ShellJob *job = add_job(ctx, pgid, JOB_RUNNING, last_pid, pipeline->source);
+    ShellJob *job =
+        record_job(shell, pgid, JOB_RUNNING, last_pid, pipeline->source);
     if (job)
       dprintf(output_fd, "[%d] %d\n", job->id, (int)pgid);
     else {
@@ -362,22 +372,22 @@ static int run_pipeline(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
         (void)waitpid(pids[i], NULL, 0);
       result = 1;
     }
-    if (ctx->foreground)
-      atomic_store(&ctx->foreground->pgid, 0);
+    if (shell->foreground)
+      atomic_store(&shell->foreground->pgid, 0);
     result = job ? 0 : 1;
   } else {
-    result =
-        wait_for_group(ctx, pgid, last_pid, output_fd, 0, pipeline->source);
+    result = wait_for_process_group(shell, pgid, last_pid, output_fd, 0,
+                                    pipeline->source);
   }
   free(pipes);
   free(pids);
   return result;
 }
 
-int shell_jobs_list(ShellContext *ctx, int output_fd) {
+int shell_jobs_list(ShellContext *shell, int output_fd) {
   int result = 0;
   for (size_t i = 0; i < TERM_MAX_JOBS; ++i) {
-    ShellJob *job = &ctx->jobs[i];
+    ShellJob *job = &shell->jobs[i];
     if (job->state == JOB_UNUSED)
       continue;
     if (job->state == JOB_RUNNING) {
@@ -403,8 +413,8 @@ int shell_jobs_list(ShellContext *ctx, int output_fd) {
   return result;
 }
 
-int shell_job_background(ShellContext *ctx, char **argv, int output_fd) {
-  ShellJob *job = find_job(ctx, argv[1]);
+int shell_job_background(ShellContext *shell, char **arguments, int output_fd) {
+  ShellJob *job = find_job_by_id(shell, arguments[1]);
   if (!job) {
     dprintf(output_fd, "terminator: bg: no such job\n");
     return 1;
@@ -422,8 +432,8 @@ int shell_job_background(ShellContext *ctx, char **argv, int output_fd) {
   return 0;
 }
 
-int shell_job_foreground(ShellContext *ctx, char **argv, int output_fd) {
-  ShellJob *job = find_job(ctx, argv[1]);
+int shell_job_foreground(ShellContext *shell, char **arguments, int output_fd) {
+  ShellJob *job = find_job_by_id(shell, arguments[1]);
   if (!job) {
     dprintf(output_fd, "terminator: fg: no such job\n");
     return 1;
@@ -436,21 +446,21 @@ int shell_job_foreground(ShellContext *ctx, char **argv, int output_fd) {
   }
   job->state = JOB_RUNNING;
   dprintf(output_fd, "%s\n", job->command);
-  if (ctx->foreground)
-    atomic_store(&ctx->foreground->pgid, (int)pgid);
-  int status =
-      wait_for_group(ctx, pgid, job->last_pid, output_fd, id, job->command);
+  if (shell->foreground)
+    atomic_store(&shell->foreground->pgid, (int)pgid);
+  int status = wait_for_process_group(shell, pgid, job->last_pid, output_fd, id,
+                                      job->command);
   for (size_t i = 0; i < TERM_MAX_JOBS; ++i)
-    if (ctx->jobs[i].id == id && ctx->jobs[i].state != JOB_STOPPED)
-      memset(&ctx->jobs[i], 0, sizeof(ctx->jobs[i]));
+    if (shell->jobs[i].id == id && shell->jobs[i].state != JOB_STOPPED)
+      memset(&shell->jobs[i], 0, sizeof(shell->jobs[i]));
   return status;
 }
 
-void shell_jobs_cleanup(ShellContext *ctx) {
-  if (!ctx)
+void shell_jobs_cleanup(ShellContext *shell) {
+  if (!shell)
     return;
   for (size_t i = 0; i < TERM_MAX_JOBS; ++i) {
-    ShellJob *job = &ctx->jobs[i];
+    ShellJob *job = &shell->jobs[i];
     if (job->state == JOB_UNUSED || job->state == JOB_DONE)
       continue;
     (void)kill(-job->pgid, SIGTERM);
@@ -460,7 +470,8 @@ void shell_jobs_cleanup(ShellContext *ctx) {
   }
 }
 
-static char *cwd_path(const char *cwd, const char *path) {
+static char *build_path_from_working_directory(const char *cwd,
+                                               const char *path) {
   if (path[0] == '/')
     return strdup(path);
   char *joined = NULL;
@@ -469,12 +480,12 @@ static char *cwd_path(const char *cwd, const char *path) {
   return joined;
 }
 
-int shell_execute(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
+int shell_execute(ShellContext *shell, Pipeline *pipeline, int output_fd) {
   if (!pipeline->count)
     return 0;
   if (pipeline->count == 1) {
     SimpleCommand *command = &pipeline->commands[0];
-    const char *name = command->argv[0];
+    const char *name = command->arguments[0];
     /* Stateful built-ins must run here so cd and job changes persist. */
     int parent_builtin = !pipeline->background &&
                          (!strcmp(name, "cd") || !strcmp(name, "exit") ||
@@ -485,40 +496,42 @@ int shell_execute(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
     if (parent_builtin) {
       int target = output_fd, opened = -1;
       if (command->input_path) {
-        char *path = cwd_path(ctx->cwd, command->input_path);
+        char *path =
+            build_path_from_working_directory(shell->cwd, command->input_path);
         int fd = path ? redirection_open_input(path, output_fd) : -1;
         free(path);
         if (fd < 0) {
-          ctx->last_status = 1;
+          shell->last_status = 1;
           return 1;
         }
         close(fd);
       }
       if (command->output_path) {
-        char *path = cwd_path(ctx->cwd, command->output_path);
+        char *path =
+            build_path_from_working_directory(shell->cwd, command->output_path);
         opened = path
                      ? redirection_open_output(path, command->append, output_fd)
                      : -1;
         free(path);
         if (opened < 0) {
-          ctx->last_status = 1;
+          shell->last_status = 1;
           return 1;
         }
         target = opened;
       }
-      int result = shell_builtin(ctx, command->argv, target);
+      int result = shell_builtin(shell, command->arguments, target);
       if (opened >= 0)
         close(opened);
-      ctx->last_status = result;
+      shell->last_status = result;
       return result;
     }
   }
-  int result = run_pipeline(ctx, pipeline, output_fd);
-  ctx->last_status = result;
+  int result = execute_pipeline(shell, pipeline, output_fd);
+  shell->last_status = result;
   return result;
 }
 
-int shell_run_line(ShellContext *ctx, const char *line, int output_fd) {
+int shell_run_line(ShellContext *shell, const char *line, int output_fd) {
   /* Parse, expand, execute, and release one complete input line. */
   Tokens tokens = {0};
   Pipeline pipeline = {0};
@@ -526,18 +539,18 @@ int shell_run_line(ShellContext *ctx, const char *line, int output_fd) {
   if (shell_parse(line, &tokens, &pipeline, &error) < 0) {
     dprintf(output_fd, "terminator: %s\n", error ? error : "parse error");
     free(error);
-    ctx->last_status = 2;
+    shell->last_status = 2;
     return 2;
   }
   shell_tokens_free(&tokens);
   for (size_t i = 0; i < pipeline.count; ++i) {
-    if (expand_command(ctx, &pipeline.commands[i], output_fd) < 0) {
+    if (expand_command_arguments(shell, &pipeline.commands[i], output_fd) < 0) {
       shell_pipeline_free(&pipeline);
-      ctx->last_status = 1;
+      shell->last_status = 1;
       return 1;
     }
   }
-  int result = shell_execute(ctx, &pipeline, output_fd);
+  int result = shell_execute(shell, &pipeline, output_fd);
   shell_pipeline_free(&pipeline);
   return result;
 }

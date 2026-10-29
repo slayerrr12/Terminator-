@@ -6,7 +6,7 @@
  * Converts shell text into tokens and pipeline structures. This module parses
  * syntax and expands words; process creation is handled by executor.c.
  */
-static int add_token(Tokens *tokens, const char *text, size_t length) {
+static int append_token(Tokens *tokens, const char *text, size_t length) {
   char *copy = malloc(length + 1);
   if (!copy)
     return -1;
@@ -73,7 +73,7 @@ int shell_lex(const char *text, Tokens *tokens, char **error) {
     /* Operators split words only when they are outside quotes/substitutions. */
     if (*s == '|' || *s == '<' || *s == '>' || *s == '&') {
       size_t n = (*s == '>' && s[1] == '>') ? 2 : 1;
-      if (add_token(tokens, s, n))
+      if (append_token(tokens, s, n))
         goto oom;
       s += n;
       continue;
@@ -135,7 +135,7 @@ int shell_lex(const char *text, Tokens *tokens, char **error) {
       shell_tokens_free(tokens);
       return -1;
     }
-    if (add_token(tokens, start, (size_t)(s - start)))
+    if (append_token(tokens, start, (size_t)(s - start)))
       goto oom;
   }
   return 0;
@@ -174,7 +174,7 @@ int shell_parse(const char *text, Tokens *tokens, Pipeline *out, char **error) {
       char *token = tokens->items[i++];
       if (!strcmp(token, "<") || !strcmp(token, ">") || !strcmp(token, ">>")) {
         int input = !strcmp(token, "<");
-        int append = !strcmp(token, ">>");
+        int append_to_file = !strcmp(token, ">>");
         if (i >= tokens->count || !strcmp(tokens->items[i], "|") ||
             !strcmp(tokens->items[i], "<") || !strcmp(tokens->items[i], ">") ||
             !strcmp(tokens->items[i], ">>")) {
@@ -187,18 +187,20 @@ int shell_parse(const char *text, Tokens *tokens, Pipeline *out, char **error) {
         *path = strdup(tokens->items[i++]);
         if (!*path)
           goto oom;
-        if (append)
+        if (append_to_file)
           command->append = 1;
         continue;
       }
-      char **argv = realloc(command->argv, (command->argc + 2) * sizeof(*argv));
-      if (!argv)
+      char **arguments =
+          realloc(command->arguments,
+                  (command->argument_count + 2) * sizeof(*arguments));
+      if (!arguments)
         goto oom;
-      command->argv = argv;
-      command->argv[command->argc++] = strdup(token);
-      if (!command->argv[command->argc - 1])
+      command->arguments = arguments;
+      command->arguments[command->argument_count++] = strdup(token);
+      if (!command->arguments[command->argument_count - 1])
         goto oom;
-      command->argv[command->argc] = NULL;
+      command->arguments[command->argument_count] = NULL;
     }
     if (i < tokens->count) {
       int background = !strcmp(tokens->items[i], "&");
@@ -219,7 +221,7 @@ int shell_parse(const char *text, Tokens *tokens, Pipeline *out, char **error) {
           goto malformed;
       }
     }
-    if (!command->argc) {
+    if (!command->argument_count) {
       if (error)
         *error = strdup("empty command");
       goto malformed;
@@ -252,9 +254,9 @@ void shell_pipeline_free(Pipeline *pipeline) {
     return;
   for (size_t i = 0; i < pipeline->count; ++i) {
     SimpleCommand *command = &pipeline->commands[i];
-    for (size_t j = 0; j < command->argc; ++j)
-      free(command->argv[j]);
-    free(command->argv);
+    for (size_t j = 0; j < command->argument_count; ++j)
+      free(command->arguments[j]);
+    free(command->arguments);
     free(command->input_path);
     free(command->output_path);
   }
@@ -271,199 +273,230 @@ void shell_pipeline_free(Pipeline *pipeline) {
 #include <sys/wait.h>
 #include <unistd.h>
 
-static int append(char **b, size_t *n, size_t *cap, const char *s, size_t z) {
-  if (*n + z + 1 > *cap) {
-    size_t c = *cap ? *cap : 64;
-    while (c < *n + z + 1)
-      c *= 2;
-    char *p = realloc(*b, c);
-    if (!p)
+/* Grow a null-terminated text buffer geometrically, then append one chunk. */
+static int append_to_buffer(char **buffer, size_t *length, size_t *capacity,
+                            const char *text, size_t text_length) {
+  if (*length + text_length + 1 > *capacity) {
+    size_t new_capacity = *capacity ? *capacity : 64;
+    while (new_capacity < *length + text_length + 1)
+      new_capacity *= 2;
+    char *grown_buffer = realloc(*buffer, new_capacity);
+    if (!grown_buffer)
       return -1;
-    *b = p;
-    *cap = c;
+    *buffer = grown_buffer;
+    *capacity = new_capacity;
   }
-  memcpy(*b + *n, s, z);
-  *n += z;
-  (*b)[*n] = 0;
+  memcpy(*buffer + *length, text, text_length);
+  *length += text_length;
+  (*buffer)[*length] = 0;
   return 0;
 }
-static int has_glob(const char *s) {
-  for (; *s; s++)
-    if (*s == '*' || *s == '?' || *s == '[')
+static int contains_wildcard(const char *text) {
+  for (; *text; text++)
+    if (*text == '*' || *text == '?' || *text == '[')
       return 1;
   return 0;
 }
-static int substitute(ShellContext *ctx, const char *cmd, size_t len,
-                      char **value, int fd) {
+static int capture_command_output(ShellContext *shell, const char *command_text,
+                                  size_t command_length, char **captured_output,
+                                  int output_fd) {
   /* Run $(...) in a child and capture its output for the containing word. */
-  int p[2];
-  if (pipe(p) < 0)
+  int capture_pipe[2];
+  if (pipe(capture_pipe) < 0)
     return -1;
   pid_t pid = fork();
   if (pid == 0) {
-    close(p[0]);
-    ShellContext sub = *ctx;
-    char *s = strndup(cmd, len);
-    int rc = s ? shell_run_line(&sub, s, p[1]) : 1;
-    free(s);
-    close(p[1]);
-    _exit(rc ? 1 : 0);
+    close(capture_pipe[0]);
+    ShellContext child_shell = *shell;
+    char *nested_command = strndup(command_text, command_length);
+    int command_status =
+        nested_command
+            ? shell_run_line(&child_shell, nested_command, capture_pipe[1])
+            : 1;
+    free(nested_command);
+    close(capture_pipe[1]);
+    _exit(command_status ? 1 : 0);
   }
-  close(p[1]);
-  char *buf = NULL;
-  size_t n = 0, cap = 0;
-  char tmp[512];
-  ssize_t r;
-  while ((r = read(p[0], tmp, sizeof(tmp))) > 0)
-    if (append(&buf, &n, &cap, tmp, (size_t)r) < 0)
+  close(capture_pipe[1]);
+  char *capture_buffer = NULL;
+  size_t captured_length = 0, capture_capacity = 0;
+  char read_buffer[512];
+  ssize_t bytes_read;
+  while ((bytes_read =
+              read(capture_pipe[0], read_buffer, sizeof(read_buffer))) > 0)
+    if (append_to_buffer(&capture_buffer, &captured_length, &capture_capacity,
+                         read_buffer, (size_t)bytes_read) < 0)
       break;
-  close(p[0]);
-  int st;
-  while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+  close(capture_pipe[0]);
+  int child_status;
+  while (waitpid(pid, &child_status, 0) < 0 && errno == EINTR) {
   }
-  if (!buf)
-    buf = strdup("");
-  while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
-    buf[--n] = 0;
-  *value = buf;
-  (void)fd;
+  if (!capture_buffer)
+    capture_buffer = strdup("");
+  while (captured_length && (capture_buffer[captured_length - 1] == '\n' ||
+                             capture_buffer[captured_length - 1] == '\r'))
+    capture_buffer[--captured_length] = 0;
+  *captured_output = capture_buffer;
+  (void)output_fd;
   return 0;
 }
-int shell_expand_word(ShellContext *ctx, const char *in, char **out, int fd,
-                      int *glob_eligible) {
+int shell_expand_word(ShellContext *shell, const char *input_text,
+                      char **expanded_word, int output_fd, int *glob_eligible) {
   /* Remove quote syntax and expand variables, substitutions, and escapes. */
-  char *b = NULL;
-  size_t n = 0, cap = 0;
-  char q = 0;
+  char *expanded_buffer = NULL;
+  size_t buffer_length = 0, buffer_capacity = 0;
+  char active_quote = 0;
   int glob_active = 0;
-  for (size_t i = 0; in[i];) {
-    char c = in[i];
-    if (!q && (c == '\'' || c == '"')) {
-      q = c;
-      ++i;
+  for (size_t input_index = 0; input_text[input_index];) {
+    char current_char = input_text[input_index];
+    if (!active_quote && (current_char == '\'' || current_char == '"')) {
+      active_quote = current_char;
+      ++input_index;
       continue;
     }
-    if (q == c) {
-      q = 0;
-      ++i;
+    if (active_quote == current_char) {
+      active_quote = 0;
+      ++input_index;
       continue;
     }
-    if (c == '\\' && q != '\'' && in[i + 1]) {
-      char next = in[i + 1];
-      if (q == '"' && next != '"' && next != '\\' && next != '$' &&
-          next != '`' && next != '\n') {
-        if (append(&b, &n, &cap, "\\", 1))
+    if (current_char == '\\' && active_quote != '\'' &&
+        input_text[input_index + 1]) {
+      char next_char = input_text[input_index + 1];
+      if (active_quote == '"' && next_char != '"' && next_char != '\\' &&
+          next_char != '$' && next_char != '`' && next_char != '\n') {
+        if (append_to_buffer(&expanded_buffer, &buffer_length, &buffer_capacity,
+                             "\\", 1))
           goto fail;
-        i++;
+        input_index++;
         continue;
       }
-      if (next != '\n' && append(&b, &n, &cap, &next, 1))
+      if (next_char != '\n' &&
+          append_to_buffer(&expanded_buffer, &buffer_length, &buffer_capacity,
+                           &next_char, 1))
         goto fail;
-      i += 2;
+      input_index += 2;
       continue;
     }
-    if (q != '\'' && c == '$') {
-      if (in[i + 1] == '(') {
-        size_t j = i + 2;
-        int d = 1;
-        char innerq = 0;
-        while (in[j] && d) {
-          if (innerq) {
-            if (in[j] == innerq)
-              innerq = 0;
-          } else if (in[j] == '\'' || in[j] == '"')
-            innerq = in[j];
-          else if (in[j] == '(')
-            d++;
-          else if (in[j] == ')')
-            d--;
-          j++;
+    if (active_quote != '\'' && current_char == '$') {
+      if (input_text[input_index + 1] == '(') {
+        size_t scan_index = input_index + 2;
+        int nesting_depth = 1;
+        char inner_quote = 0;
+        while (input_text[scan_index] && nesting_depth) {
+          if (inner_quote) {
+            if (input_text[scan_index] == inner_quote)
+              inner_quote = 0;
+          } else if (input_text[scan_index] == '\'' ||
+                     input_text[scan_index] == '"')
+            inner_quote = input_text[scan_index];
+          else if (input_text[scan_index] == '(')
+            nesting_depth++;
+          else if (input_text[scan_index] == ')')
+            nesting_depth--;
+          scan_index++;
         }
-        if (d) {
+        if (nesting_depth) {
           errno = EINVAL;
           goto fail;
         }
-        char *v = NULL;
-        if (substitute(ctx, in + i + 2, j - i - 3, &v, fd) < 0)
+        char *expansion_value = NULL;
+        if (capture_command_output(shell, input_text + input_index + 2,
+                                   scan_index - input_index - 3,
+                                   &expansion_value, output_fd) < 0)
           goto fail;
-        if (!q && has_glob(v))
+        if (!active_quote && contains_wildcard(expansion_value))
           glob_active = 1;
-        if (append(&b, &n, &cap, v, strlen(v))) {
-          free(v);
+        if (append_to_buffer(&expanded_buffer, &buffer_length, &buffer_capacity,
+                             expansion_value, strlen(expansion_value))) {
+          free(expansion_value);
           goto fail;
         }
-        free(v);
-        i = j;
+        free(expansion_value);
+        input_index = scan_index;
         continue;
       }
-      size_t j = i + 1;
-      char name[256];
-      size_t k = 0;
-      if (in[j] == '?') {
-        snprintf(name, sizeof(name), "%d", ctx->last_status);
-        j++;
-      } else if (in[j] == '{') {
-        j++;
-        while (in[j] && in[j] != '}' && k < sizeof(name) - 1)
-          name[k++] = in[j++];
-        if (in[j] == '}')
-          j++;
-        name[k] = 0;
-      } else if (isalpha((unsigned char)in[j]) || in[j] == '_') {
-        while ((isalnum((unsigned char)in[j]) || in[j] == '_') &&
-               k < sizeof(name) - 1)
-          name[k++] = in[j++];
-        name[k] = 0;
+      size_t scan_index = input_index + 1;
+      char variable_name[256];
+      size_t name_length = 0;
+      if (input_text[scan_index] == '?') {
+        snprintf(variable_name, sizeof(variable_name), "%d",
+                 shell->last_status);
+        scan_index++;
+      } else if (input_text[scan_index] == '{') {
+        scan_index++;
+        while (input_text[scan_index] && input_text[scan_index] != '}' &&
+               name_length < sizeof(variable_name) - 1)
+          variable_name[name_length++] = input_text[scan_index++];
+        if (input_text[scan_index] == '}')
+          scan_index++;
+        variable_name[name_length] = 0;
+      } else if (isalpha((unsigned char)input_text[scan_index]) ||
+                 input_text[scan_index] == '_') {
+        while ((isalnum((unsigned char)input_text[scan_index]) ||
+                input_text[scan_index] == '_') &&
+               name_length < sizeof(variable_name) - 1)
+          variable_name[name_length++] = input_text[scan_index++];
+        variable_name[name_length] = 0;
       } else {
-        if (append(&b, &n, &cap, "$", 1))
+        if (append_to_buffer(&expanded_buffer, &buffer_length, &buffer_capacity,
+                             "$", 1))
           goto fail;
-        i++;
+        input_index++;
         continue;
       }
-      const char *v;
-      if (name[0] && (!strcmp(name, "?") || isdigit((unsigned char)name[0])))
-        v = name;
+      const char *expansion_value;
+      if (variable_name[0] && (!strcmp(variable_name, "?") ||
+                               isdigit((unsigned char)variable_name[0])))
+        expansion_value = variable_name;
       else
-        v = getenv(name);
-      if (!q && v && has_glob(v))
+        expansion_value = getenv(variable_name);
+      if (!active_quote && expansion_value &&
+          contains_wildcard(expansion_value))
         glob_active = 1;
-      if (v && append(&b, &n, &cap, v, strlen(v)))
+      if (expansion_value &&
+          append_to_buffer(&expanded_buffer, &buffer_length, &buffer_capacity,
+                           expansion_value, strlen(expansion_value)))
         goto fail;
-      i = j;
+      input_index = scan_index;
       continue;
     }
-    if (c == '`' && q != '\'') {
-      size_t j = i + 1;
-      while (in[j] && in[j] != '`')
-        j++;
-      if (!in[j])
+    if (current_char == '`' && active_quote != '\'') {
+      size_t scan_index = input_index + 1;
+      while (input_text[scan_index] && input_text[scan_index] != '`')
+        scan_index++;
+      if (!input_text[scan_index])
         goto fail;
-      char *v = NULL;
-      if (substitute(ctx, in + i + 1, j - i - 1, &v, fd) < 0)
+      char *expansion_value = NULL;
+      if (capture_command_output(shell, input_text + input_index + 1,
+                                 scan_index - input_index - 1, &expansion_value,
+                                 output_fd) < 0)
         goto fail;
-      if (!q && has_glob(v))
+      if (!active_quote && contains_wildcard(expansion_value))
         glob_active = 1;
-      if (append(&b, &n, &cap, v, strlen(v))) {
-        free(v);
+      if (append_to_buffer(&expanded_buffer, &buffer_length, &buffer_capacity,
+                           expansion_value, strlen(expansion_value))) {
+        free(expansion_value);
         goto fail;
       }
-      free(v);
-      i = j + 1;
+      free(expansion_value);
+      input_index = scan_index + 1;
       continue;
     }
-    if (!q && (c == '*' || c == '?' || c == '['))
+    if (!active_quote &&
+        (current_char == '*' || current_char == '?' || current_char == '['))
       glob_active = 1;
-    if (append(&b, &n, &cap, &c, 1))
+    if (append_to_buffer(&expanded_buffer, &buffer_length, &buffer_capacity,
+                         &current_char, 1))
       goto fail;
-    i++;
+    input_index++;
   }
-  if (!b)
-    b = strdup("");
-  *out = b;
+  if (!expanded_buffer)
+    expanded_buffer = strdup("");
+  *expanded_word = expanded_buffer;
   if (glob_eligible)
     *glob_eligible = glob_active;
   return 0;
 fail:
-  free(b);
+  free(expanded_buffer);
   return -1;
 }

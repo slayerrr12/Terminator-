@@ -22,8 +22,8 @@ typedef struct {
 } WatchCommand;
 
 /* Start one command and give the supervisor a nonblocking output pipe. */
-static int watch_start(WatchCommand *watch, ShellContext *ctx,
-                       int process_group, int output_fd) {
+static int start_watched_command(WatchCommand *watch, ShellContext *shell,
+                                 int process_group, int output_fd) {
   int output[2];
   if (pipe(output) < 0)
     return -1;
@@ -39,7 +39,7 @@ static int watch_start(WatchCommand *watch, ShellContext *ctx,
     (void)dup2(output[1], STDOUT_FILENO);
     (void)dup2(output[1], STDERR_FILENO);
     close(output[1]);
-    ShellContext child_context = *ctx;
+    ShellContext child_context = *shell;
     child_context.foreground = NULL;
     child_context.process_group = process_group;
     _exit(shell_run_line(&child_context, watch->command, STDOUT_FILENO) & 255);
@@ -60,9 +60,9 @@ static int watch_start(WatchCommand *watch, ShellContext *ctx,
 }
 
 /* Run every command concurrently and forward ready pipe data as it arrives. */
-static int watch_supervisor(WatchCommand *commands, size_t count,
-                            ShellContext *ctx, int output_fd) {
-  pid_t group = ctx->process_group;
+static int run_watch_supervisor(WatchCommand *commands, size_t count,
+                                ShellContext *shell, int output_fd) {
+  pid_t group = shell->process_group;
   if (group <= 0) {
     (void)setpgid(0, 0);
     group = getpgrp();
@@ -71,7 +71,7 @@ static int watch_supervisor(WatchCommand *commands, size_t count,
     commands[i].pid = 0;
     commands[i].output_fd = -1;
     commands[i].restart_at = 0;
-    if (watch_start(&commands[i], ctx, (int)group, output_fd) < 0) {
+    if (start_watched_command(&commands[i], shell, (int)group, output_fd) < 0) {
       dprintf(output_fd, "terminator: multiWatch: %s\n", strerror(errno));
       commands[i].restart_at = time(NULL) + 2;
     }
@@ -89,7 +89,8 @@ static int watch_supervisor(WatchCommand *commands, size_t count,
             (struct pollfd){commands[i].output_fd, POLLIN | POLLHUP, 0};
         indexes[poll_count++] = i;
       } else if (commands[i].restart_at <= now) {
-        if (watch_start(&commands[i], ctx, (int)group, output_fd) < 0) {
+        if (start_watched_command(&commands[i], shell, (int)group, output_fd) <
+            0) {
           dprintf(output_fd, "terminator: multiWatch: %s\n", strerror(errno));
           commands[i].restart_at = now + 2;
         }
@@ -144,20 +145,22 @@ static int watch_supervisor(WatchCommand *commands, size_t count,
   return 1;
 }
 
-int shell_builtin_multiwatch(ShellContext *ctx, char **argv, int out) {
+int shell_builtin_multiwatch(ShellContext *shell, char **arguments,
+                             int output_fd) {
   size_t count = 0;
-  for (size_t i = 1; argv[i]; ++i) {
-    char *arg = argv[i];
-    if (*arg == '[')
-      ++arg;
-    size_t length = strlen(arg);
-    while (length && (arg[length - 1] == ',' || arg[length - 1] == ']'))
-      arg[--length] = '\0';
+  for (size_t i = 1; arguments[i]; ++i) {
+    char *argument = arguments[i];
+    if (*argument == '[')
+      ++argument;
+    size_t length = strlen(argument);
+    while (length &&
+           (argument[length - 1] == ',' || argument[length - 1] == ']'))
+      argument[--length] = '\0';
     if (length)
       ++count;
   }
   if (!count || count > TERM_MAX_JOBS) {
-    dprintf(out, "terminator: multiWatch: expected 1-%d commands\n",
+    dprintf(output_fd, "terminator: multiWatch: expected 1-%d commands\n",
             TERM_MAX_JOBS);
     return 2;
   }
@@ -165,41 +168,42 @@ int shell_builtin_multiwatch(ShellContext *ctx, char **argv, int out) {
   if (!commands)
     return 1;
   size_t index = 0;
-  for (size_t i = 1; argv[i]; ++i) {
-    char *arg = argv[i];
-    if (*arg == '[')
-      ++arg;
-    size_t length = strlen(arg);
-    while (length && (arg[length - 1] == ',' || arg[length - 1] == ']'))
-      arg[--length] = '\0';
+  for (size_t i = 1; arguments[i]; ++i) {
+    char *argument = arguments[i];
+    if (*argument == '[')
+      ++argument;
+    size_t length = strlen(argument);
+    while (length &&
+           (argument[length - 1] == ',' || argument[length - 1] == ']'))
+      argument[--length] = '\0';
     if (length)
-      commands[index++].command = arg;
+      commands[index++].command = argument;
   }
   /* A background invocation already runs in its tracked job process group. */
-  if (ctx->process_group > 0) {
-    int result = watch_supervisor(commands, count, ctx, out);
+  if (shell->process_group > 0) {
+    int result = run_watch_supervisor(commands, count, shell, output_fd);
     free(commands);
     return result;
   }
   pid_t supervisor = fork();
   if (supervisor == 0) {
-    int result = watch_supervisor(commands, count, ctx, out);
+    int result = run_watch_supervisor(commands, count, shell, output_fd);
     free(commands);
     _exit(result);
   }
   free(commands);
   if (supervisor < 0) {
-    dprintf(out, "terminator: multiWatch: %s\n", strerror(errno));
+    dprintf(output_fd, "terminator: multiWatch: %s\n", strerror(errno));
     return 1;
   }
   (void)setpgid(supervisor, supervisor);
-  if (ctx->foreground)
-    atomic_store(&ctx->foreground->pgid, (int)supervisor);
+  if (shell->foreground)
+    atomic_store(&shell->foreground->pgid, (int)supervisor);
   int status = 0;
   while (waitpid(supervisor, &status, WUNTRACED) < 0 && errno == EINTR) {
   }
-  if (ctx->foreground)
-    atomic_store(&ctx->foreground->pgid, 0);
+  if (shell->foreground)
+    atomic_store(&shell->foreground->pgid, 0);
   if (WIFSIGNALED(status))
     return 128 + WTERMSIG(status);
   return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
