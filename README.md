@@ -57,6 +57,8 @@ it. `make clean` removes the executable and generated build files.
 
 For the implementation of each assignment task, see
 [docs/TASK_IMPLEMENTATION_README.md](docs/TASK_IMPLEMENTATION_README.md).
+For a beginner walkthrough of the GUI, tabs, execution modes, built-ins, and
+`execvp()`, see [docs/tasks-1-and-2-explained.md](docs/tasks-1-and-2-explained.md).
 Architecture and design details are in [docs/architecture.md](docs/architecture.md)
 and [docs/design.md](docs/design.md).
 The complete requirements remain in [Terminator - Google Docs.pdf](<Terminator - Google Docs.pdf>);
