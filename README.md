@@ -54,11 +54,22 @@ it. `make clean` removes the executable and generated build files.
   `jobs`, `fg`, and `bg`.
 - External commands launched with `fork()` and `execvp()`.
 - Multiline input, single and double quotes, environment variables, `$?`,
-  command substitution, and wildcard expansion.
+  nested and multiline `$()` and backtick substitutions, and wildcard expansion.
 - Pipelines of multiple commands and input/output redirection (`<`, `>`, `>>`).
 - Background jobs with basic `jobs`, `fg`, `bg`, Ctrl+C, and Ctrl+Z support.
 - `multiWatch` runs commands concurrently and collects their output without
   busy-waiting.
+- Persistent configurable editing hotkeys read from `~/.terminatorrc`.
+
+## Change hotkeys
+
+Copy [docs/terminatorrc.example](docs/terminatorrc.example) to
+`~/.terminatorrc`, edit the key names, and restart Terminator. For example,
+`move_left = Alt+Left` changes the cursor-left shortcut. Supported modifiers
+are `Ctrl`, `Shift`, and `Alt`; key names use X11 names such as `Left`, `F12`,
+or a letter. If a binding is invalid or conflicts with another binding,
+Terminator reports it in the first tab's scrollback and uses the default for
+that action.
 
 For the implementation of each assignment task, see
 [docs/TASK_IMPLEMENTATION_README.md](docs/TASK_IMPLEMENTATION_README.md).
@@ -78,8 +89,8 @@ terminal control sequences are not supported. The current history is shared
 and kept in memory, with a limit of 1,024 commands; it is not saved between
 runs.
 
-User-configurable hotkeys, command-history search, filename completion, and the
-custom Bash-subset script interpreter are not implemented. `source` executes
-complete input lines using Terminator's existing shell parser; it does not
-provide the custom interpreter described in the larger assignment. See
-[docs/roadmap.md](docs/roadmap.md) for task status and remaining work.
+Command-history search, filename completion, and the custom Bash-subset script
+interpreter are later assignment tasks and are not implemented. `source`
+executes complete input lines using Terminator's existing shell parser; it does
+not provide that custom interpreter. See [docs/roadmap.md](docs/roadmap.md) for
+task status and remaining work.

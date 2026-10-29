@@ -50,6 +50,7 @@ typedef struct {
 } Tokens;
 
 int shell_is_complete(const char *text);
+int shell_trailing_backslash_continues(const char *text);
 int shell_lex(const char *text, Tokens *tokens, char **error);
 int shell_parse(const char *text, Tokens *tokens, Pipeline *pipeline,
                 char **error);

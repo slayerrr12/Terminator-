@@ -46,15 +46,20 @@ the semaphore is initialized with process sharing enabled.
 
 ## Parsing and expansion
 
-`parser.c` first checks whether the input is complete. It tracks open quotes,
-backticks, escapes, and nested `$()` substitutions so the GUI can keep
-collecting multiline input. The lexer keeps quoted text together and separates
-operators such as `|`, `<`, `>`, `>>`, and `&`. The parser groups tokens into
-commands and a pipeline.
+`parser.c` uses the same quote-aware word scanner to decide whether input is
+complete and to split tokens. The scanner keeps multiline quotes and nested
+`$()` or backtick substitutions together, including quoted parentheses inside
+substitutions. The GUI asks for another line until those constructs close. The
+lexer separates operators such as `|`, `<`, `>`, `>>`, and `&`; the parser
+groups tokens into commands and a pipeline.
 
 Before execution, the shell expands environment variables, `$?`, command
-substitutions, and eligible wildcard patterns. This is a deliberate shell
-subset. It does not implement every Bash expansion or grammar rule.
+substitutions, and eligible wildcard patterns. A command substitution runs in
+a copy of the current tab's shell state and writes output to a temporary file.
+The parser removes trailing newlines from captured output. Single quotes keep
+their contents literal; double quotes still allow variable and command
+substitution. This is a deliberate shell subset, not every Bash expansion or
+grammar rule.
 
 ## Processes, pipelines, and redirection
 
@@ -84,14 +89,23 @@ to the tab. When a command exits, the supervisor starts it again after two
 seconds. Ctrl+C targets the supervisor's process group; the tab worker remains
 available for the next command.
 
+## Hotkey configuration
+
+`hotkeys.c` starts with the assignment defaults, then reads
+`~/.terminatorrc`. Each line maps an action such as `move_left` to a key such as
+`Alt+Left`. The loader checks key names and modifier combinations, detects
+collisions, and keeps the default for invalid or conflicting entries. The GUI
+reports those problems in the first tab's scrollback. A sample configuration
+is in `docs/terminatorrc.example`.
+
 ## Current limits
 
 - History is shared between tabs but is only stored in memory. It keeps at
   most 1,024 commands and is cleared when the application exits.
 - `source` executes complete input lines with the current shell parser. It is
   not the custom Bash-subset script interpreter in the assignment.
-- Hotkeys cannot be configured or saved. History search and filename
-  completion are not implemented.
+- History search and filename completion belong to later assignment tasks and
+  are not implemented.
 - Background jobs use process groups and signals, but there is no PTY to
   provide full interactive terminal job control.
 

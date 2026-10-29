@@ -1,0 +1,21 @@
+# Copy to ~/.terminatorrc and edit the bindings you want to change.
+# Changes load on startup and remain active after restarts.
+
+move_left = Left
+move_right = Right
+line_start = Ctrl+A
+line_end = Ctrl+E
+history_up = Up
+history_down = Down
+delete_to_start = Ctrl+U
+delete_to_end = Ctrl+K
+delete_previous_word = Ctrl+W
+clear_screen = Ctrl+L
+close_tab = Ctrl+D
+copy = Ctrl+Shift+C
+paste = Ctrl+Shift+V
+
+# These additional controls can also be changed.
+interrupt = Ctrl+C
+suspend = Ctrl+Z
+new_tab = Ctrl+T

@@ -9,6 +9,7 @@ include/
   shell.h        Parser, command, shell-state, and job structures
   scrollback.h   Per-tab scrollback buffer and scrolling interface
   selection.h    Text selection and clipboard interface
+  hotkeys.h      Configurable key-binding interface
 src/
   main.c         Startup, mode selection, shared history, and shutdown
   gui.c          X11 window, keyboard input, drawing, and event loop
@@ -20,6 +21,7 @@ src/
   multiwatch.c   Concurrent command supervisor for multiWatch
   history.c      Shared in-memory command history
   scrollback.c   Bounded per-tab output history and viewport tracking
+  hotkeys.c      Default hotkeys and ~/.terminatorrc loading
 docs/            Task guide, architecture, design, and roadmap
 ```
 

@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "hotkeys.h"
 #include "selection.h"
 #include "terminator.h"
 #include <X11/Xlib.h>
@@ -24,6 +25,7 @@ static GC gc;
 static XFontStruct *font;
 static int width = 900, height = 600;
 static Atom wm_delete;
+static HotkeyConfig hotkey_config;
 static void clear_scrollback(Tab *tab) {
   scrollback_clear(&tab->scrollback);
   selection_clear();
@@ -287,7 +289,7 @@ static void submit_input(App *app, Tab *tab) {
   tab->multiline_buffer[tab->multiline_length] = 0;
   if (!shell_is_complete(tab->multiline_buffer)) {
     size_t n = tab->input_length;
-    if (n && tab->input_buffer[n - 1] == '\\') {
+    if (n && shell_trailing_backslash_continues(tab->multiline_buffer)) {
       tab->multiline_length--;
       tab->multiline_buffer[tab->multiline_length] = 0;
     } else
@@ -311,31 +313,53 @@ static void submit_input(App *app, Tab *tab) {
   (void)app;
 }
 static void handle_key_press(App *app, XKeyEvent *key_event) {
-  /* Apply editing and control shortcuts to the currently selected tab. */
+  /* Apply configured editing and control shortcuts to the selected tab. */
   Tab *tab = &app->tabs[app->active_tab];
   KeySym key_symbol;
-  KeySym hotkey_symbol = XLookupKeysym(key_event, 0);
+  KeySym base_key = XLookupKeysym(key_event, 0);
   char buf[64];
   int n = XLookupString(key_event, buf, sizeof(buf), &key_symbol, NULL);
-  int ctrl = (key_event->state & ControlMask) != 0;
-  int shift = (key_event->state & ShiftMask) != 0;
-  if (ctrl && shift && hotkey_symbol == XK_c) {
-    selection_copy_to_clipboard(app, dpy, win);
+  HotkeyAction action =
+      hotkeys_find_action(&hotkey_config, base_key, key_event->state);
+  switch (action) {
+  case HOTKEY_MOVE_LEFT:
+    if (tab->input_cursor)
+      tab->input_cursor--;
     return;
-  }
-  if (ctrl && shift && hotkey_symbol == XK_v) {
-    selection_request_paste(dpy, win);
+  case HOTKEY_MOVE_RIGHT:
+    if (tab->input_cursor < tab->input_length)
+      tab->input_cursor++;
     return;
-  }
-  if (ctrl && !shift && hotkey_symbol == XK_c) {
-    signal_foreground_job(tab, SIGINT, "^C\n");
+  case HOTKEY_LINE_START:
+    tab->input_cursor = 0;
     return;
-  }
-  if (ctrl && !shift && hotkey_symbol == XK_z) {
-    signal_foreground_job(tab, SIGTSTP, "^Z\n");
+  case HOTKEY_LINE_END:
+    tab->input_cursor = tab->input_length;
     return;
-  }
-  if (ctrl && !shift && hotkey_symbol == XK_d) {
+  case HOTKEY_HISTORY_UP:
+    browse_history(app, tab, -1);
+    return;
+  case HOTKEY_HISTORY_DOWN:
+    browse_history(app, tab, 1);
+    return;
+  case HOTKEY_DELETE_TO_START:
+    memmove(tab->input_buffer, tab->input_buffer + tab->input_cursor,
+            tab->input_length - tab->input_cursor);
+    tab->input_length -= tab->input_cursor;
+    tab->input_cursor = 0;
+    tab->input_buffer[tab->input_length] = '\0';
+    return;
+  case HOTKEY_DELETE_TO_END:
+    tab->input_length = tab->input_cursor;
+    tab->input_buffer[tab->input_length] = '\0';
+    return;
+  case HOTKEY_DELETE_PREVIOUS_WORD:
+    delete_previous_word(tab);
+    return;
+  case HOTKEY_CLEAR_SCREEN:
+    clear_scrollback(tab);
+    return;
+  case HOTKEY_CLOSE_TAB:
     if (!tab->input_length && !tab->multiline_length) {
       selection_clear();
       app_close_tab(app, app->active_tab);
@@ -343,12 +367,26 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
         terminator_stopping = 1;
     }
     return;
-  }
-  if (ctrl && !shift && hotkey_symbol == XK_t) {
+  case HOTKEY_COPY:
+    selection_copy_to_clipboard(app, dpy, win);
+    return;
+  case HOTKEY_PASTE:
+    selection_request_paste(dpy, win);
+    return;
+  case HOTKEY_INTERRUPT:
+    signal_foreground_job(tab, SIGINT, "^C\n");
+    return;
+  case HOTKEY_SUSPEND:
+    signal_foreground_job(tab, SIGTSTP, "^Z\n");
+    return;
+  case HOTKEY_NEW_TAB:
     selection_clear();
     if (app_add_tab(app) < 0)
       append_output_text(tab, "terminator: maximum tabs reached\n", 34);
     return;
+  case HOTKEY_NONE:
+  case HOTKEY_COUNT:
+    break;
   }
   if (key_symbol == XK_Return || key_symbol == XK_KP_Enter) {
     submit_input(app, tab);
@@ -363,43 +401,19 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
     tab->input_buffer[tab->input_length] = 0;
     return;
   }
-  if (key_symbol == XK_Left && tab->input_cursor)
-    tab->input_cursor--;
-  if (key_symbol == XK_Right && tab->input_cursor < tab->input_length)
-    tab->input_cursor++;
-  if (key_symbol == XK_Home || (ctrl && hotkey_symbol == XK_a))
+  if (key_symbol == XK_Home)
     tab->input_cursor = 0;
-  if (key_symbol == XK_End || (ctrl && hotkey_symbol == XK_e))
+  if (key_symbol == XK_End)
     tab->input_cursor = tab->input_length;
-  if (ctrl && !shift && hotkey_symbol == XK_u) {
-    memmove(tab->input_buffer, tab->input_buffer + tab->input_cursor,
-            tab->input_length - tab->input_cursor);
-    tab->input_length -= tab->input_cursor;
-    tab->input_cursor = 0;
-    tab->input_buffer[tab->input_length] = 0;
-  }
-  if (ctrl && !shift && hotkey_symbol == XK_k) {
-    tab->input_length = tab->input_cursor;
-    tab->input_buffer[tab->input_length] = 0;
-  }
-  if (ctrl && !shift && hotkey_symbol == XK_w) {
-    delete_previous_word(tab);
-  }
-  if (ctrl && !shift && hotkey_symbol == XK_l) {
-    clear_scrollback(tab);
-  }
   size_t visible_rows = terminal_visible_rows();
-  if (!ctrl && !shift && hotkey_symbol == XK_Up)
-    browse_history(app, tab, -1);
-  if (!ctrl && !shift && hotkey_symbol == XK_Down)
-    browse_history(app, tab, 1);
   if (key_symbol == XK_Page_Up)
     scrollback_scroll_up(&tab->scrollback, visible_rows,
                          visible_rows > 1 ? visible_rows - 1 : 1);
   if (key_symbol == XK_Page_Down)
     scrollback_scroll_down(&tab->scrollback, visible_rows,
                            visible_rows > 1 ? visible_rows - 1 : 1);
-  if (n > 0 && !ctrl && key_symbol != XK_BackSpace && key_symbol != XK_Return &&
+  if (n > 0 && !(key_event->state & ControlMask) &&
+      key_symbol != XK_BackSpace && key_symbol != XK_Return &&
       key_symbol != XK_Left && key_symbol != XK_Right && key_symbol != XK_Up &&
       key_symbol != XK_Down && key_symbol != XK_Page_Up &&
       key_symbol != XK_Page_Down && key_symbol != XK_Home &&
@@ -413,6 +427,12 @@ int gui_run(App *app) {
     fprintf(stderr, "terminator: cannot open X display\n");
     return 1;
   }
+  char hotkey_warnings[2048];
+  hotkeys_load_user_config(&hotkey_config, hotkey_warnings,
+                           sizeof(hotkey_warnings));
+  if (hotkey_warnings[0])
+    append_output_text(&app->tabs[app->active_tab], hotkey_warnings,
+                       strlen(hotkey_warnings));
   int screen = DefaultScreen(dpy);
   app->x11_connection_fd = ConnectionNumber(dpy);
   win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 30, 30,

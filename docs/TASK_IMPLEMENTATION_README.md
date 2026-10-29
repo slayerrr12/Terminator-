@@ -13,6 +13,7 @@ include/
   terminator.h       App, Tab, worker, and shared-history data structures
   shell.h            Shell state, parsed commands, and job structures
   scrollback.h       Per-tab scrollback and viewport interface
+  hotkeys.h          Configurable key-binding interface
 src/
   main.c             Startup, execution-mode selection, and shutdown
   gui.c              X11 window, keyboard input, drawing, and event loop
@@ -24,6 +25,7 @@ src/
   history.c          Shared in-memory command history
   scrollback.c       Bounded per-tab output history and scrolling behavior
   selection.c        Text selection and X11 clipboard handling
+  hotkeys.c          Default keys and ~/.terminatorrc configuration
 docs/                This guide, design notes, architecture, and roadmap
 Makefile             Build, run, and clean commands
 README.md            Dependencies, build instructions, features, and limits
@@ -216,16 +218,21 @@ by the later script-interpreter task.
 
 ### Implementation details
 
-The GUI collects more input when the command is incomplete. The parser checks
-whether quotes, escapes, backticks, or a `$()` command substitution are still
-open. If so, Enter adds a continuation line instead of sending the command to
-the worker.
+The GUI collects more input when the command is incomplete. `shell_is_complete`
+and `shell_lex` use the same scanner so quotes, escapes, backticks, and nested
+`$()` substitutions are treated consistently. If a quote or substitution is
+still open, Enter adds a continuation line instead of sending the command to
+the worker. Both substitution forms can contain multiple lines, and nested
+substitutions run from the inside out.
 
 The lexer keeps quoted text together while separating shell operators. The
-word expander removes quote characters and handles the implemented variables,
-`$?`, command substitutions, and eligible wildcard patterns. Single-quoted
-text stays literal. Double-quoted text permits variable and command
-substitution. This is a useful shell subset, not every Bash quoting rule.
+word expander removes quote characters and handles environment variables,
+`$?`, nested command substitutions, and eligible wildcard patterns.
+Single-quoted text stays literal. Double-quoted text still expands variables
+and substitutions. Captured output is stored in a temporary file, then trailing
+newlines are removed before it is added to the surrounding word. This covers
+the quoting and substitution rules requested by this task; it is not every Bash
+expansion.
 
 ### Where is the code for this?
 
@@ -237,7 +244,8 @@ substitution. This is a useful shell subset, not every Bash quoting rule.
 ### Explanation of incomplete input
 
 `submit_input()` asks `shell_is_complete()` before sending anything. For
-example, an open double quote means the user is still entering one command:
+example, an open double quote or command substitution means the user is still
+entering one command:
 
 ```sh
 echo "first line
@@ -245,9 +253,10 @@ second line"
 ```
 
 The first Enter does not run `echo`. The GUI displays the continuation prompt
-and keeps collecting text. Once the closing quote arrives, the complete
-command is sent through the tab's input pipe. A trailing backslash joins the
-next line according to the implementation's continuation handling.
+and keeps collecting text. Once the closing quote or substitution arrives,
+the complete command is sent through the tab's input pipe. A trailing
+backslash joins the next line according to the implementation's continuation
+handling.
 
 ## Task 4: I/O redirection
 
@@ -346,17 +355,23 @@ followed by a separator line, as required by the assignment:
 
 ## Task 7: configurable hotkeys
 
-`src/gui.c` handles the assigned editing keys directly in
-`handle_key_press()`: Left/Right move the cursor, Ctrl+A/E move to the start or
-end, Ctrl+U/K delete to either end, and Ctrl+W deletes the previous word.
-Ctrl+L clears the active tab's output, while Ctrl+D closes an empty tab.
-Up/Down browse the shared command history; Page Up/Page Down and the mouse
-wheel scroll output.
+`src/hotkeys.c` defines the assignment defaults and loads optional overrides
+from `~/.terminatorrc`. The sample file is
+`docs/terminatorrc.example`. For example, `move_left = Alt+Left` changes the
+cursor-left key without recompiling. The config loads at startup, so custom
+bindings remain active after restart.
 
-Dragging over output selects text. `src/selection.c` owns selection drawing,
-mouse tracking, and X11 clipboard exchange. Ctrl+Shift+C copies selected text;
-Ctrl+Shift+V inserts clipboard text into the input line. The bindings are fixed
-in the code; user-configurable saved bindings are not implemented.
+`src/gui.c` calls `hotkeys_find_action()` from `handle_key_press()` and applies
+the action to the selected tab. Left/Right move the cursor, Ctrl+A/E move to
+the start or end, Ctrl+U/K delete to either end, and Ctrl+W deletes the previous
+word. Ctrl+L clears the active tab's output, while Ctrl+D closes an empty tab.
+Up/Down browse shared history. Ctrl+Shift+C/V use the X11 selection code to
+copy and paste. Ctrl+C and Ctrl+Z signal the active job; Ctrl+T opens a tab.
+
+If a configured key is unknown or conflicts with another binding, the loader
+reports the problem in the first tab's scrollback and keeps the default for
+that action. Dragging over output selects text. `src/selection.c` owns selection
+drawing, mouse tracking, and X11 clipboard exchange.
 
 ## Task 8: signals and job control
 
@@ -402,8 +417,8 @@ script. The custom interpreter task remains future work.
   interactive applications.
 - History is shared between tabs but exists only in memory and holds at most
   1,024 entries.
-- Configurable hotkeys, history search, file-name completion, and the custom
-  script interpreter remain unfinished.
+- History search, file-name completion, and the custom script interpreter
+  belong to later assignment tasks and remain unfinished.
 
 See [architecture.md](architecture.md) for module responsibilities,
 [design.md](design.md) for implementation choices, and
