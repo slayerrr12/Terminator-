@@ -51,3 +51,22 @@ size_t history_snapshot(SharedHistory *history, char (*snapshot)[TERM_LINE_MAX],
   sem_post(&history->semaphore);
   return entry_count;
 }
+
+/* Copy one history entry without allocating a full snapshot in the GUI. */
+int history_get_recent(SharedHistory *history, size_t offset_from_newest,
+                       char *buffer, size_t buffer_size) {
+  if (!history || !buffer || !buffer_size || lock_history(history) < 0)
+    return 0;
+  if (offset_from_newest >= history->entry_count) {
+    sem_post(&history->semaphore);
+    return 0;
+  }
+
+  size_t newest =
+      (history->next_entry + TERM_HISTORY_CAP - 1) % TERM_HISTORY_CAP;
+  size_t entry_index =
+      (newest + TERM_HISTORY_CAP - offset_from_newest) % TERM_HISTORY_CAP;
+  snprintf(buffer, buffer_size, "%s", history->entries[entry_index]);
+  sem_post(&history->semaphore);
+  return 1;
+}

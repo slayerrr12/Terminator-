@@ -1,9 +1,11 @@
 #include "shell.h"
 #include "terminator.h"
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <errno.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
@@ -21,8 +23,30 @@ static GC gc;
 static XFontStruct *font;
 static int width = 900, height = 600;
 static Atom wm_delete;
+static Atom clipboard_atom, utf8_atom, targets_atom, text_atom;
+static Atom clipboard_property;
+static Atom paste_selection;
+static int paste_pending, paste_tried_string;
+static char *clipboard_text;
+
+typedef struct {
+  int active;
+  int dragging;
+  size_t tab_index;
+  size_t start_line, start_column;
+  size_t end_line, end_column;
+} TextSelection;
+
+static TextSelection text_selection;
+
+static void clear_text_selection(void) {
+  text_selection.active = 0;
+  text_selection.dragging = 0;
+}
+
 static void clear_scrollback(Tab *tab) {
   scrollback_clear(&tab->scrollback);
+  clear_text_selection();
 }
 
 /* Pipe reads can split text at any byte; the scrollback joins each chunk. */
@@ -73,6 +97,147 @@ static size_t terminal_visible_rows(void) {
   return visible > 0 ? (size_t)visible : 1;
 }
 
+static int compare_position(size_t line_a, size_t column_a, size_t line_b,
+                            size_t column_b) {
+  if (line_a != line_b)
+    return line_a < line_b ? -1 : 1;
+  if (column_a == column_b)
+    return 0;
+  return column_a < column_b ? -1 : 1;
+}
+
+static void ordered_selection(size_t *first_line, size_t *first_column,
+                              size_t *last_line, size_t *last_column) {
+  *first_line = text_selection.start_line;
+  *first_column = text_selection.start_column;
+  *last_line = text_selection.end_line;
+  *last_column = text_selection.end_column;
+  if (compare_position(*first_line, *first_column, *last_line,
+                       *last_column) > 0) {
+    size_t line = *first_line, column = *first_column;
+    *first_line = *last_line;
+    *first_column = *last_column;
+    *last_line = line;
+    *last_column = column;
+  }
+}
+
+static int selected_columns(size_t line_number, size_t line_length,
+                            size_t *first_column, size_t *last_column) {
+  if (!text_selection.active)
+    return 0;
+  size_t first_line, first, last_line, last;
+  ordered_selection(&first_line, &first, &last_line, &last);
+  if (line_number < first_line || line_number > last_line)
+    return 0;
+
+  *first_column = line_number == first_line ? first : 0;
+  *last_column = line_number == last_line ? last : line_length;
+  if (*first_column > line_length)
+    *first_column = line_length;
+  if (*last_column > line_length)
+    *last_column = line_length;
+  return *last_column > *first_column;
+}
+
+static int text_width(const char *text, size_t length) {
+  if (!length)
+    return 0;
+  return font ? XTextWidth(font, text, (int)length) : (int)length * 8;
+}
+
+static void draw_output_line(size_t line_number, const char *line, int x,
+                             int baseline) {
+  size_t length = strlen(line), first = 0, last = 0;
+  if (!selected_columns(line_number, length, &first, &last)) {
+    XDrawString(dpy, win, gc, x, baseline, line, (int)length);
+    return;
+  }
+
+  XDrawString(dpy, win, gc, x, baseline, line, (int)first);
+  int selection_x = x + text_width(line, first);
+  int selection_width = text_width(line + first, last - first);
+  int ascent = font ? font->ascent : 12;
+  int line_height = font ? font->ascent + font->descent : 15;
+  XSetForeground(dpy, gc, 0x85a8d0);
+  XFillRectangle(dpy, win, gc, selection_x, baseline - ascent,
+                 (unsigned)(selection_width > 1 ? selection_width : 2),
+                 (unsigned)line_height);
+  XSetForeground(dpy, gc, 0x171717);
+  XDrawString(dpy, win, gc, selection_x, baseline, line + first,
+              (int)(last - first));
+  XSetForeground(dpy, gc, 0xf2f2f2);
+  XDrawString(dpy, win, gc, selection_x + selection_width, baseline,
+              line + last, (int)(length - last));
+}
+
+static size_t column_at_x(const char *line, int x) {
+  if (x <= 0)
+    return 0;
+  int character_width = font ? font->max_bounds.width : 8;
+  if (character_width < 1)
+    character_width = 8;
+  size_t column = (size_t)(x + character_width / 2) / (size_t)character_width;
+  size_t length = strlen(line);
+  if (column > length)
+    column = length;
+  return column;
+}
+
+static int mouse_text_position(App *app, int x, int y, size_t *line_number,
+                               size_t *column) {
+  Tab *tab = &app->tabs[app->active_tab];
+  const int top = 54;
+  if (y < top || !tab->scrollback.line_count)
+    return 0;
+
+  size_t row = (size_t)((y - top) / terminal_line_height());
+  size_t line = scrollback_first_visible(&tab->scrollback,
+                                         terminal_visible_rows()) + row;
+  if (line >= tab->scrollback.line_count)
+    return 0;
+  const char *text = scrollback_get_line(&tab->scrollback, line);
+  *line_number = line;
+  *column = column_at_x(text, x - 12);
+  return 1;
+}
+
+static char *copy_selected_text(const Scrollback *scrollback,
+                                size_t *copied_length) {
+  if (!text_selection.active)
+    return NULL;
+
+  size_t first_line, first_column, last_line, last_column;
+  ordered_selection(&first_line, &first_column, &last_line, &last_column);
+  size_t capacity = TERM_SCROLLBACK_MAX_BYTES + TERM_SCROLLBACK_MAX_LINES + 1;
+  char *text = malloc(capacity);
+  if (!text)
+    return NULL;
+
+  size_t used = 0;
+  for (size_t line_number = first_line;
+       line_number <= last_line && line_number < scrollback->line_count;
+       ++line_number) {
+    const char *line = scrollback_get_line(scrollback, line_number);
+    size_t length = strlen(line);
+    size_t start = line_number == first_line ? first_column : 0;
+    size_t end = line_number == last_line ? last_column : length;
+    if (start > length)
+      start = length;
+    if (end > length)
+      end = length;
+    if (end > start && used + end - start < capacity) {
+      memcpy(text + used, line + start, end - start);
+      used += end - start;
+    }
+    if (line_number < last_line && used + 1 < capacity)
+      text[used++] = '\n';
+  }
+  text[used] = '\0';
+  *copied_length = used;
+  return text;
+}
+
 static void draw_terminal_window(App *app) {
   if (!dpy)
     return;
@@ -120,7 +285,7 @@ static void draw_terminal_window(App *app) {
     const char *line = scrollback_get_line(&tab->scrollback, row);
     int line_x = 12;
     if (line[0]) {
-      XDrawString(dpy, win, gc, line_x, y, line, (int)strlen(line));
+      draw_output_line(row, line, line_x, y);
       line_x += font ? XTextWidth(font, line, (int)strlen(line))
                      : (int)strlen(line) * 8;
     }
@@ -159,6 +324,168 @@ static void insert_input_text(Tab *tab, const char *text, size_t n) {
   tab->input_cursor += n;
   tab->input_buffer[tab->input_length] = 0;
 }
+
+static void set_input_text(Tab *tab, const char *text) {
+  size_t length = strlen(text);
+  if (length >= sizeof(tab->input_buffer))
+    length = sizeof(tab->input_buffer) - 1;
+  memcpy(tab->input_buffer, text, length);
+  tab->input_buffer[length] = '\0';
+  tab->input_length = length;
+  tab->input_cursor = length;
+}
+
+static void browse_history(App *app, Tab *tab, int direction) {
+  if (tab->multiline_length)
+    return;
+
+  char history_line[TERM_LINE_MAX];
+  if (direction < 0) {
+    size_t offset = tab->history_position;
+    if (!history_get_recent(app->history, offset, history_line,
+                            sizeof(history_line)))
+      return;
+    if (!tab->history_position) {
+      memcpy(tab->history_draft, tab->input_buffer, tab->input_length + 1);
+      tab->history_draft_length = tab->input_length;
+      tab->history_draft_cursor = tab->input_cursor;
+    }
+    tab->history_position++;
+    set_input_text(tab, history_line);
+  } else if (tab->history_position) {
+    tab->history_position--;
+    if (!tab->history_position) {
+      memcpy(tab->input_buffer, tab->history_draft,
+             tab->history_draft_length + 1);
+      tab->input_length = tab->history_draft_length;
+      tab->input_cursor = tab->history_draft_cursor;
+    } else if (history_get_recent(app->history, tab->history_position - 1,
+                                  history_line, sizeof(history_line))) {
+      set_input_text(tab, history_line);
+    }
+  }
+}
+
+static void delete_previous_word(Tab *tab) {
+  size_t word_start = tab->input_cursor;
+  while (word_start && isspace((unsigned char)tab->input_buffer[word_start - 1]))
+    word_start--;
+  while (word_start &&
+         !isspace((unsigned char)tab->input_buffer[word_start - 1]))
+    word_start--;
+
+  size_t removed = tab->input_cursor - word_start;
+  memmove(tab->input_buffer + word_start,
+          tab->input_buffer + tab->input_cursor,
+          tab->input_length - tab->input_cursor + 1);
+  tab->input_length -= removed;
+  tab->input_cursor = word_start;
+}
+
+static void copy_selection(App *app) {
+  if (!text_selection.active || text_selection.tab_index >= app->tab_count ||
+      text_selection.tab_index != app->active_tab)
+    return;
+
+  size_t length = 0;
+  char *copy = copy_selected_text(
+      &app->tabs[text_selection.tab_index].scrollback, &length);
+  if (!copy || !length) {
+    free(copy);
+    return;
+  }
+  free(clipboard_text);
+  clipboard_text = copy;
+  XSetSelectionOwner(dpy, clipboard_atom, win, CurrentTime);
+  XSetSelectionOwner(dpy, XA_PRIMARY, win, CurrentTime);
+  XFlush(dpy);
+}
+
+static void request_paste(void) {
+  paste_selection = clipboard_atom;
+  if (XGetSelectionOwner(dpy, paste_selection) == None)
+    paste_selection = XA_PRIMARY;
+  if (XGetSelectionOwner(dpy, paste_selection) == None)
+    return;
+
+  paste_pending = 1;
+  paste_tried_string = 0;
+  XConvertSelection(dpy, paste_selection, utf8_atom, clipboard_property, win,
+                    CurrentTime);
+  XFlush(dpy);
+}
+
+static void reply_to_selection_request(XSelectionRequestEvent *request) {
+  XSelectionEvent response = {0};
+  response.type = SelectionNotify;
+  response.display = request->display;
+  response.requestor = request->requestor;
+  response.selection = request->selection;
+  response.target = request->target;
+  response.time = request->time;
+  response.property = None;
+
+  Atom property = request->property == None ? request->target : request->property;
+  if (request->target == targets_atom) {
+    Atom supported[] = {targets_atom, utf8_atom, text_atom, XA_STRING};
+    XChangeProperty(dpy, request->requestor, property, XA_ATOM, 32,
+                    PropModeReplace, (unsigned char *)supported,
+                    (int)(sizeof(supported) / sizeof(supported[0])));
+    response.property = property;
+  } else if (clipboard_text &&
+             (request->target == utf8_atom || request->target == text_atom ||
+              request->target == XA_STRING)) {
+    Atom type = request->target == XA_STRING ? XA_STRING : utf8_atom;
+    XChangeProperty(dpy, request->requestor, property, type, 8, PropModeReplace,
+                    (unsigned char *)clipboard_text,
+                    (int)strlen(clipboard_text));
+    response.property = property;
+  }
+
+  XSendEvent(dpy, request->requestor, False, 0, (XEvent *)&response);
+  XFlush(dpy);
+}
+
+static void receive_paste(App *app, XSelectionEvent *event) {
+  if (!paste_pending || event->selection != paste_selection)
+    return;
+  if (event->property == None) {
+    if (!paste_tried_string) {
+      paste_tried_string = 1;
+      XConvertSelection(dpy, paste_selection, XA_STRING, clipboard_property,
+                        win, CurrentTime);
+      XFlush(dpy);
+    } else {
+      paste_pending = 0;
+    }
+    return;
+  }
+
+  Atom actual_type;
+  int format;
+  unsigned long item_count, bytes_after;
+  unsigned char *data = NULL;
+  long max_items = (TERM_LINE_MAX + 3) / 4;
+  int result = XGetWindowProperty(dpy, win, clipboard_property, 0, max_items,
+                                  True, AnyPropertyType, &actual_type, &format,
+                                  &item_count, &bytes_after, &data);
+  if (result == Success && format == 8 && data) {
+    Tab *tab = &app->tabs[app->active_tab];
+    size_t available = TERM_LINE_MAX - 1 - tab->input_length;
+    size_t count = item_count < available ? item_count : available;
+    char paste[TERM_LINE_MAX];
+    for (size_t i = 0; i < count; ++i) {
+      char character = (char)data[i];
+      paste[i] = character == '\n' || character == '\r' ? ' ' : character;
+    }
+    insert_input_text(tab, paste, count);
+  }
+  if (data)
+    XFree(data);
+  paste_pending = 0;
+  draw_terminal_window(app);
+}
+
 static int send_command_to_worker(int file_descriptor, const char *text,
                                   size_t n) {
   size_t sent = 0;
@@ -201,6 +528,7 @@ static void submit_input(App *app, Tab *tab) {
       tab->multiline_buffer[tab->multiline_length++] = '\n';
     tab->input_length = tab->input_cursor = 0;
     tab->input_buffer[0] = 0;
+    tab->history_position = 0;
     draw_terminal_window(app);
     return;
   }
@@ -213,16 +541,27 @@ static void submit_input(App *app, Tab *tab) {
   tab->multiline_buffer[0] = 0;
   tab->input_length = tab->input_cursor = 0;
   tab->input_buffer[0] = 0;
+  tab->history_position = 0;
   (void)app;
 }
 static void handle_key_press(App *app, XKeyEvent *key_event) {
   /* Apply editing and control shortcuts to the currently selected tab. */
   Tab *tab = &app->tabs[app->active_tab];
   KeySym key_symbol;
+  KeySym hotkey_symbol = XLookupKeysym(key_event, 0);
   char buf[64];
   int n = XLookupString(key_event, buf, sizeof(buf), &key_symbol, NULL);
   int ctrl = (key_event->state & ControlMask) != 0;
-  if (ctrl && key_symbol == XK_c) {
+  int shift = (key_event->state & ShiftMask) != 0;
+  if (ctrl && shift && hotkey_symbol == XK_c) {
+    copy_selection(app);
+    return;
+  }
+  if (ctrl && shift && hotkey_symbol == XK_v) {
+    request_paste();
+    return;
+  }
+  if (ctrl && !shift && hotkey_symbol == XK_c) {
     int pgid = atomic_load(&tab->foreground->pgid);
     if (pgid > 0) {
       (void)kill(-pgid, SIGINT);
@@ -230,7 +569,7 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
     }
     return;
   }
-  if (ctrl && key_symbol == XK_z) {
+  if (ctrl && !shift && hotkey_symbol == XK_z) {
     int pgid = atomic_load(&tab->foreground->pgid);
     if (pgid > 0) {
       (void)kill(-pgid, SIGTSTP);
@@ -238,15 +577,17 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
     }
     return;
   }
-  if (ctrl && key_symbol == XK_d) {
+  if (ctrl && !shift && hotkey_symbol == XK_d) {
     if (!tab->input_length && !tab->multiline_length) {
+      clear_text_selection();
       app_close_tab(app, app->active_tab);
       if (!app->tab_count)
         terminator_stopping = 1;
     }
     return;
   }
-  if (ctrl && key_symbol == XK_t) {
+  if (ctrl && !shift && hotkey_symbol == XK_t) {
+    clear_text_selection();
     if (app_add_tab(app) < 0)
       append_output_text(tab, "terminator: maximum tabs reached\n", 34);
     return;
@@ -268,29 +609,32 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
     tab->input_cursor--;
   if (key_symbol == XK_Right && tab->input_cursor < tab->input_length)
     tab->input_cursor++;
-  if (key_symbol == XK_Home || (ctrl && key_symbol == XK_a))
+  if (key_symbol == XK_Home || (ctrl && hotkey_symbol == XK_a))
     tab->input_cursor = 0;
-  if (key_symbol == XK_End || (ctrl && key_symbol == XK_e))
+  if (key_symbol == XK_End || (ctrl && hotkey_symbol == XK_e))
     tab->input_cursor = tab->input_length;
-  if (ctrl && key_symbol == XK_u) {
+  if (ctrl && !shift && hotkey_symbol == XK_u) {
     memmove(tab->input_buffer, tab->input_buffer + tab->input_cursor,
             tab->input_length - tab->input_cursor);
     tab->input_length -= tab->input_cursor;
     tab->input_cursor = 0;
     tab->input_buffer[tab->input_length] = 0;
   }
-  if (ctrl && key_symbol == XK_k) {
+  if (ctrl && !shift && hotkey_symbol == XK_k) {
     tab->input_length = tab->input_cursor;
     tab->input_buffer[tab->input_length] = 0;
   }
-  if (ctrl && key_symbol == XK_l) {
+  if (ctrl && !shift && hotkey_symbol == XK_w) {
+    delete_previous_word(tab);
+  }
+  if (ctrl && !shift && hotkey_symbol == XK_l) {
     clear_scrollback(tab);
   }
   size_t visible_rows = terminal_visible_rows();
-  if (key_symbol == XK_Up)
-    scrollback_scroll_up(&tab->scrollback, visible_rows, 10);
-  if (key_symbol == XK_Down)
-    scrollback_scroll_down(&tab->scrollback, visible_rows, 10);
+  if (!ctrl && !shift && hotkey_symbol == XK_Up)
+    browse_history(app, tab, -1);
+  if (!ctrl && !shift && hotkey_symbol == XK_Down)
+    browse_history(app, tab, 1);
   if (key_symbol == XK_Page_Up)
     scrollback_scroll_up(&tab->scrollback, visible_rows,
                          visible_rows > 1 ? visible_rows - 1 : 1);
@@ -319,7 +663,12 @@ int gui_run(App *app) {
   XStoreName(dpy, win, "Terminator");
   XSelectInput(dpy, win,
                ExposureMask | KeyPressMask | StructureNotifyMask |
-                   ButtonPressMask);
+                   ButtonPressMask | ButtonReleaseMask | ButtonMotionMask);
+  clipboard_atom = XInternAtom(dpy, "CLIPBOARD", False);
+  utf8_atom = XInternAtom(dpy, "UTF8_STRING", False);
+  targets_atom = XInternAtom(dpy, "TARGETS", False);
+  text_atom = XInternAtom(dpy, "TEXT", False);
+  clipboard_property = XInternAtom(dpy, "TERMINATOR_CLIPBOARD", False);
   wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
   XSetWMProtocols(dpy, win, &wm_delete, 1);
   gc = XCreateGC(dpy, win, 0, NULL);
@@ -373,6 +722,7 @@ int gui_run(App *app) {
           draw_terminal_window(app);
         } else if (ev.type == ButtonPress) {
           if (ev.xbutton.y < 34) {
+            clear_text_selection();
             int plus_x = calculate_add_tab_button_x(app->tab_count);
             if (ev.xbutton.x >= plus_x && ev.xbutton.x < plus_x + 32) {
               if (app_add_tab(app) < 0)
@@ -397,7 +747,51 @@ int gui_run(App *app) {
             else
               scrollback_scroll_down(&tab->scrollback, visible_rows, 3);
             draw_terminal_window(app);
+          } else if (ev.xbutton.button == Button1) {
+            size_t line_number, column;
+            clear_text_selection();
+            if (mouse_text_position(app, ev.xbutton.x, ev.xbutton.y,
+                                    &line_number, &column)) {
+              text_selection.dragging = 1;
+              text_selection.tab_index = app->active_tab;
+              text_selection.start_line = line_number;
+              text_selection.start_column = column;
+              text_selection.end_line = line_number;
+              text_selection.end_column = column;
+            }
+            draw_terminal_window(app);
           }
+        } else if (ev.type == MotionNotify && text_selection.dragging) {
+          size_t line_number, column;
+          if (mouse_text_position(app, ev.xmotion.x, ev.xmotion.y,
+                                  &line_number, &column)) {
+            text_selection.end_line = line_number;
+            text_selection.end_column = column;
+            text_selection.active =
+                compare_position(text_selection.start_line,
+                                 text_selection.start_column, line_number,
+                                 column) != 0;
+            draw_terminal_window(app);
+          }
+        } else if (ev.type == ButtonRelease &&
+                   ev.xbutton.button == Button1) {
+          size_t line_number, column;
+          if (text_selection.dragging &&
+              mouse_text_position(app, ev.xbutton.x, ev.xbutton.y,
+                                  &line_number, &column)) {
+            text_selection.end_line = line_number;
+            text_selection.end_column = column;
+            text_selection.active =
+                compare_position(text_selection.start_line,
+                                 text_selection.start_column, line_number,
+                                 column) != 0;
+          }
+          text_selection.dragging = 0;
+          draw_terminal_window(app);
+        } else if (ev.type == SelectionRequest) {
+          reply_to_selection_request(&ev.xselectionrequest);
+        } else if (ev.type == SelectionNotify) {
+          receive_paste(app, &ev.xselection);
         } else if (ev.type == ClientMessage &&
                    (Atom)ev.xclient.data.l[0] == wm_delete) {
           goto done;
@@ -429,8 +823,15 @@ int gui_run(App *app) {
           close_tab[map[i]] = 1;
       }
     for (size_t i = app->tab_count; i > 0; i--)
-      if (close_tab[i - 1])
+      if (close_tab[i - 1]) {
+        if (text_selection.active || text_selection.dragging) {
+          if (text_selection.tab_index == i - 1)
+            clear_text_selection();
+          else if (text_selection.tab_index > i - 1)
+            text_selection.tab_index--;
+        }
         app_close_tab(app, i - 1);
+      }
     if (app->tab_count)
       draw_terminal_window(app);
   }
@@ -440,5 +841,7 @@ done:
   XFreeGC(dpy, gc);
   XDestroyWindow(dpy, win);
   XCloseDisplay(dpy);
+  free(clipboard_text);
+  clipboard_text = NULL;
   return 0;
 }

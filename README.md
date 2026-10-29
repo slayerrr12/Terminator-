@@ -38,10 +38,12 @@ it. `make clean` removes the executable and generated build files.
 - Press **Ctrl+D** on an empty command line to close the current tab.
 - Press **Ctrl+C** to interrupt the selected tab's foreground job and **Ctrl+Z**
   to stop it.
-- Use **Up** and **Down** to move 10 lines at a time, **Page Up/Page Down** to
-  move by a screen, or the mouse wheel to move 3 lines per notch. Each tab
-  keeps up to 10,000 lines of output within a 1 MiB scrollback text budget.
-  If one line exceeds that budget, its oldest characters are discarded.
+- Use **Up** and **Down** to browse the shared command history. Use **Page
+  Up/Page Down** or the mouse wheel to scroll output. Each tab keeps up to
+  10,000 output lines within a 1 MiB scrollback budget.
+- Use **Ctrl+Shift+C/V** to copy selected output and paste text into the input.
+- Use **Ctrl+A/E**, **Ctrl+U/K/W**, **Left/Right**, and **Backspace** to edit
+  the current command line. **Ctrl+L** clears the active tab's output.
 
 ## Implemented features
 
@@ -76,7 +78,7 @@ terminal control sequences are not supported. The current history is shared
 and kept in memory, with a limit of 1,024 commands; it is not saved between
 runs.
 
-Configurable hotkeys, command-history search, filename completion, and the
+User-configurable hotkeys, command-history search, filename completion, and the
 custom Bash-subset script interpreter are not implemented. `source` executes
 complete input lines using Terminator's existing shell parser; it does not
 provide the custom interpreter described in the larger assignment. See

@@ -344,14 +344,18 @@ followed by a separator line, as required by the assignment:
 
 ## Task 7: configurable hotkeys
 
-Basic editing and control keys are implemented in `src/gui.c`, including
-left/right, Home/End, Ctrl+A, Ctrl+E, Ctrl+U, Ctrl+K, Ctrl+L, Ctrl+D, Ctrl+C,
-Ctrl+Z, and Ctrl+T. Up and Down move through output in small steps. Page Up,
-Page Down, and the mouse wheel also scroll the active tab.
+`src/gui.c` handles the assigned editing keys directly in
+`handle_key_press()`: Left/Right move the cursor, Ctrl+A/E move to the start or
+end, Ctrl+U/K delete to either end, and Ctrl+W deletes the previous word.
+Ctrl+L clears the active tab's output, while Ctrl+D closes an empty tab.
+Up/Down browse the shared command history; Page Up/Page Down and the mouse
+wheel scroll output.
 
-The assignment's saved custom key bindings, Ctrl+W, command-history navigation,
-and X11 copy/paste are not implemented. Key definitions are currently handled
-directly by `handle_key_press()`.
+Dragging over output selects text. Ctrl+Shift+C places the selection on the
+X11 clipboard, and Ctrl+Shift+V inserts clipboard text into the input line.
+`reply_to_selection_request()` and `receive_paste()` handle the X11 clipboard
+exchange. The bindings are fixed in the code; user-configurable saved bindings
+are not implemented.
 
 ## Task 8: signals and job control
 
@@ -367,7 +371,9 @@ provide the full foreground-terminal behavior of a normal Linux terminal.
 
 `src/history.c` stores up to 1,024 commands in a shared in-memory ring. A
 semaphore protects reads and writes in both execution modes. The `history`
-built-in prints the saved entries.
+built-in prints the saved entries, and Up/Down retrieve recent entries for the
+active input line. Page Up/Page Down and the mouse wheel control output
+scrollback separately.
 
 The assignment's persistent 10,000-command file and Ctrl+R search are not
 implemented.
