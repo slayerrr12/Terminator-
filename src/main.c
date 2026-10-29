@@ -28,7 +28,7 @@ int main(int argument_count, char **arguments) {
     return 2;
   }
   App app = {0};
-  app.x_fd = -1;
+  app.x11_connection_fd = -1;
   app.mode = mode;
   if (mode == MODE_PROCESSES) {
     app.history = mmap(NULL, sizeof(*app.history), PROT_READ | PROT_WRITE,
@@ -37,12 +37,22 @@ int main(int argument_count, char **arguments) {
       perror("mmap");
       return 1;
     }
-    history_init(app.history, 1);
+    if (history_init(app.history, 1) < 0) {
+      perror("sem_init");
+      munmap(app.history, sizeof(*app.history));
+      return 1;
+    }
   } else {
     app.history = calloc(1, sizeof(*app.history));
-    if (!app.history)
+    if (!app.history) {
+      perror("calloc");
       return 1;
-    history_init(app.history, 0);
+    }
+    if (history_init(app.history, 0) < 0) {
+      perror("sem_init");
+      free(app.history);
+      return 1;
+    }
   }
   if (app_add_tab(&app) < 0) {
     fprintf(stderr, "terminator: could not create initial tab\n");

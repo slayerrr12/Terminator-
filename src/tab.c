@@ -21,24 +21,58 @@ static void set_close_on_exec(int fd) {
     (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
+static void close_pipe_pair(int pipe_ends[2]) {
+  for (int end = 0; end < 2; end++) {
+    if (pipe_ends[end] >= 0) {
+      close(pipe_ends[end]);
+      pipe_ends[end] = -1;
+    }
+  }
+}
+
+static void close_tab_pipes(int input_pipe[2], int output_pipe[2],
+                            int status_pipe[2]) {
+  close_pipe_pair(input_pipe);
+  close_pipe_pair(output_pipe);
+  close_pipe_pair(status_pipe);
+}
+
+static int create_tab_pipes(int input_pipe[2], int output_pipe[2],
+                            int status_pipe[2]) {
+  input_pipe[0] = input_pipe[1] = -1;
+  output_pipe[0] = output_pipe[1] = -1;
+  status_pipe[0] = status_pipe[1] = -1;
+
+  if (pipe(input_pipe) < 0 || pipe(output_pipe) < 0 || pipe(status_pipe) < 0) {
+    close_tab_pipes(input_pipe, output_pipe, status_pipe);
+    return -1;
+  }
+  return 0;
+}
+
 static void *run_shell_worker_thread(void *argument);
 
 /* Create a tab's three communication pipes and start its shell worker. */
 int app_add_tab(App *app) {
-  if (app->count >= TERM_MAX_TABS)
+  if (app->tab_count >= TERM_MAX_TABS)
     return -1;
-  size_t tab_index = app->count;
-  char start_cwd[4096];
-  if (app->count)
-    memcpy(start_cwd, app->tabs[app->active].cwd, sizeof(start_cwd));
-  else if (!getcwd(start_cwd, sizeof(start_cwd)))
-    strcpy(start_cwd, "/");
-  start_cwd[sizeof(start_cwd) - 1] = 0;
+  size_t tab_index = app->tab_count;
+  char initial_working_directory[TERM_PATH_BUFFER];
+  if (app->tab_count)
+    memcpy(initial_working_directory,
+           app->tabs[app->active_tab].working_directory,
+           sizeof(initial_working_directory));
+  else if (!getcwd(initial_working_directory,
+                   sizeof(initial_working_directory)))
+    strcpy(initial_working_directory, "/");
+  initial_working_directory[sizeof(initial_working_directory) - 1] = 0;
   Tab *tab = &app->tabs[tab_index];
   memset(tab, 0, sizeof(*tab));
-  tab->id = (int)tab_index;
-  tab->input_fd = tab->output_fd = tab->status_fd = -1;
-  memcpy(tab->cwd, start_cwd, sizeof(tab->cwd));
+  tab->gui_to_worker_fd = -1;
+  tab->worker_to_gui_fd = -1;
+  tab->status_from_worker_fd = -1;
+  memcpy(tab->working_directory, initial_working_directory,
+         sizeof(tab->working_directory));
   tab->foreground = mmap(NULL, sizeof(*tab->foreground), PROT_READ | PROT_WRITE,
                          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (tab->foreground == MAP_FAILED) {
@@ -51,21 +85,7 @@ int app_add_tab(App *app) {
    * GUI -> worker input, worker -> GUI output, worker -> GUI status.
    */
   int input_pipe[2], output_pipe[2], status_pipe[2];
-  if (pipe(input_pipe) < 0) {
-    munmap(tab->foreground, sizeof(*tab->foreground));
-    return -1;
-  }
-  if (pipe(output_pipe) < 0) {
-    close(input_pipe[0]);
-    close(input_pipe[1]);
-    munmap(tab->foreground, sizeof(*tab->foreground));
-    return -1;
-  }
-  if (pipe(status_pipe) < 0) {
-    close(input_pipe[0]);
-    close(input_pipe[1]);
-    close(output_pipe[0]);
-    close(output_pipe[1]);
+  if (create_tab_pipes(input_pipe, output_pipe, status_pipe) < 0) {
     munmap(tab->foreground, sizeof(*tab->foreground));
     return -1;
   }
@@ -76,125 +96,118 @@ int app_add_tab(App *app) {
   }
   tab->history = app->history;
   if (app->mode == MODE_THREADS) {
-    tab->input_fd = input_pipe[1];
-    tab->output_fd = output_pipe[0];
-    tab->status_fd = status_pipe[0];
+    tab->gui_to_worker_fd = input_pipe[1];
+    tab->worker_to_gui_fd = output_pipe[0];
+    tab->status_from_worker_fd = status_pipe[0];
     tab->worker_input_fd = input_pipe[0];
     tab->worker_output_fd = output_pipe[1];
     tab->worker_status_fd = status_pipe[1];
-    tab->alive = tab->is_thread = 1;
-    if (pthread_create(&tab->thread, NULL, run_shell_worker_thread, tab) != 0) {
-      close(input_pipe[0]);
-      close(input_pipe[1]);
-      close(output_pipe[0]);
-      close(output_pipe[1]);
-      close(status_pipe[0]);
-      close(status_pipe[1]);
+    tab->worker_is_thread = 1;
+    if (pthread_create(&tab->worker_thread, NULL, run_shell_worker_thread,
+                       tab) != 0) {
+      close_tab_pipes(input_pipe, output_pipe, status_pipe);
       munmap(tab->foreground, sizeof(*tab->foreground));
       tab->foreground = NULL;
       return -1;
     }
   } else {
-    pid_t pid = fork();
-    if (pid == 0) {
+    pid_t worker_pid = fork();
+    if (worker_pid == 0) {
       /* The worker must not keep GUI connections or other tabs' pipe ends. */
-      if (app->x_fd >= 0)
-        close(app->x_fd);
-      for (size_t existing_tab_index = 0; existing_tab_index < app->count;
+      if (app->x11_connection_fd >= 0)
+        close(app->x11_connection_fd);
+      for (size_t existing_tab_index = 0; existing_tab_index < app->tab_count;
            existing_tab_index++) {
-        if (app->tabs[existing_tab_index].input_fd >= 0)
-          close(app->tabs[existing_tab_index].input_fd);
-        if (app->tabs[existing_tab_index].output_fd >= 0)
-          close(app->tabs[existing_tab_index].output_fd);
-        if (app->tabs[existing_tab_index].status_fd >= 0)
-          close(app->tabs[existing_tab_index].status_fd);
+        if (app->tabs[existing_tab_index].gui_to_worker_fd >= 0)
+          close(app->tabs[existing_tab_index].gui_to_worker_fd);
+        if (app->tabs[existing_tab_index].worker_to_gui_fd >= 0)
+          close(app->tabs[existing_tab_index].worker_to_gui_fd);
+        if (app->tabs[existing_tab_index].status_from_worker_fd >= 0)
+          close(app->tabs[existing_tab_index].status_from_worker_fd);
       }
       close(input_pipe[1]);
       close(output_pipe[0]);
       close(status_pipe[0]);
       (void)setpgid(0, 0);
       worker_run(input_pipe[0], output_pipe[1], status_pipe[1], app->history,
-                 tab->foreground, (int)tab_index, tab->cwd);
+                 tab->foreground, tab->working_directory);
       _exit(0);
     }
-    if (pid < 0) {
-      close(input_pipe[0]);
-      close(input_pipe[1]);
-      close(output_pipe[0]);
-      close(output_pipe[1]);
-      close(status_pipe[0]);
-      close(status_pipe[1]);
+    if (worker_pid < 0) {
+      close_tab_pipes(input_pipe, output_pipe, status_pipe);
       munmap(tab->foreground, sizeof(*tab->foreground));
       tab->foreground = NULL;
       return -1;
     }
-    (void)setpgid(pid, pid);
+    (void)setpgid(worker_pid, worker_pid);
     close(input_pipe[0]);
     close(output_pipe[1]);
     close(status_pipe[1]);
-    tab->input_fd = input_pipe[1];
-    tab->output_fd = output_pipe[0];
-    tab->status_fd = status_pipe[0];
-    tab->pid = pid;
-    tab->alive = 1;
+    tab->gui_to_worker_fd = input_pipe[1];
+    tab->worker_to_gui_fd = output_pipe[0];
+    tab->status_from_worker_fd = status_pipe[0];
+    tab->worker_pid = worker_pid;
   }
-  (void)fcntl(tab->output_fd, F_SETFL, O_NONBLOCK);
-  (void)fcntl(tab->status_fd, F_SETFL, O_NONBLOCK);
-  app->count++;
-  app->active = tab_index;
+  (void)fcntl(tab->worker_to_gui_fd, F_SETFL, O_NONBLOCK);
+  (void)fcntl(tab->status_from_worker_fd, F_SETFL, O_NONBLOCK);
+  app->tab_count++;
+  app->active_tab = tab_index;
   return (int)tab_index;
 }
 static void *run_shell_worker_thread(void *argument) {
   Tab *tab = argument;
   worker_run(tab->worker_input_fd, tab->worker_output_fd, tab->worker_status_fd,
-             tab->history, tab->foreground, tab->id, tab->cwd);
+             tab->history, tab->foreground, tab->working_directory);
   return NULL;
 }
 /* Stop the tab's active job, join/reap its worker, and release its buffers. */
 void app_close_tab(App *app, size_t tab_index) {
-  if (tab_index >= app->count)
+  if (tab_index >= app->tab_count)
     return;
   Tab *tab = &app->tabs[tab_index];
   /* Stop the active foreground group before joining or reaping its worker. */
   int pgid = atomic_load(&tab->foreground->pgid);
   if (pgid > 0)
     (void)kill(-pgid, SIGTERM);
-  if (tab->input_fd >= 0) {
-    close(tab->input_fd);
-    tab->input_fd = -1;
+  if (tab->gui_to_worker_fd >= 0) {
+    close(tab->gui_to_worker_fd);
+    tab->gui_to_worker_fd = -1;
   }
-  if (tab->is_thread) {
-    pthread_join(tab->thread, NULL);
-  } else if (tab->pid > 0) {
-    (void)kill(-tab->pid, SIGTERM);
+  if (tab->worker_is_thread) {
+    pthread_join(tab->worker_thread, NULL);
+  } else if (tab->worker_pid > 0) {
+    (void)kill(-tab->worker_pid, SIGTERM);
     int worker_status;
-    while (waitpid(tab->pid, &worker_status, 0) < 0 && errno == EINTR) {
+    while (waitpid(tab->worker_pid, &worker_status, 0) < 0 && errno == EINTR) {
     }
   }
-  if (tab->output_fd >= 0)
-    close(tab->output_fd);
-  if (tab->status_fd >= 0)
-    close(tab->status_fd);
-  for (size_t i = 0; i < tab->line_count; i++)
-    free(tab->lines[i]);
-  free(tab->lines);
+  if (tab->worker_to_gui_fd >= 0)
+    close(tab->worker_to_gui_fd);
+  if (tab->status_from_worker_fd >= 0)
+    close(tab->status_from_worker_fd);
+  for (size_t i = 0; i < tab->output_line_count; i++)
+    free(tab->output_lines[i]);
+  free(tab->output_lines);
   if (tab->foreground)
     munmap(tab->foreground, sizeof(*tab->foreground));
-  if (tab_index + 1 < app->count)
+  if (tab_index + 1 < app->tab_count)
     memmove(&app->tabs[tab_index], &app->tabs[tab_index + 1],
-            (app->count - tab_index - 1) * sizeof(Tab));
-  app->count--;
-  if (app->count) {
-    if (app->active >= app->count)
-      app->active = app->count - 1;
+            (app->tab_count - tab_index - 1) * sizeof(Tab));
+  app->tab_count--;
+  if (app->tab_count) {
+    if (app->active_tab >= app->tab_count)
+      app->active_tab = app->tab_count - 1;
   }
 }
 void app_shutdown(App *app) {
-  while (app->count)
-    app_close_tab(app, app->count - 1);
-  if (app->mode == MODE_PROCESSES && app->history) {
-    sem_destroy(&app->history->lock);
+  while (app->tab_count)
+    app_close_tab(app, app->tab_count - 1);
+  if (!app->history)
+    return;
+
+  sem_destroy(&app->history->semaphore);
+  if (app->mode == MODE_PROCESSES)
     munmap(app->history, sizeof(*app->history));
-  } else
+  else
     free(app->history);
 }

@@ -17,9 +17,12 @@ typedef struct {
   int background;
   char *source;
 } Pipeline;
+
 #define TERM_MAX_JOBS 64
-/* Job state belongs to one shell tab; pgid controls every process in a job. */
+
+/* A job belongs to one tab and contains one or more child processes. */
 typedef enum { JOB_UNUSED, JOB_RUNNING, JOB_STOPPED, JOB_DONE } JobState;
+
 typedef struct {
   int id;
   pid_t pgid;
@@ -27,10 +30,11 @@ typedef struct {
   JobState state;
   char command[TERM_LINE_MAX];
 } ShellJob;
-/* Per-tab shell state. cwd is logical and never changes the GUI's directory. */
+
+/* State that belongs to one tab's shell worker. */
 typedef struct {
-  char cwd[4096];  /* Logical cwd; workers avoid changing the GUI cwd. */
-  int last_status; /* Status used by $? and the next worker response. */
+  char working_directory[TERM_PATH_BUFFER];
+  int last_status;
   int should_exit;
   int clear_requested;
   int next_job_id;
@@ -39,10 +43,12 @@ typedef struct {
   SharedForeground *foreground;
   ShellJob jobs[TERM_MAX_JOBS];
 } ShellContext;
+
 typedef struct {
   char **items;
   size_t count;
 } Tokens;
+
 int shell_is_complete(const char *text);
 int shell_lex(const char *text, Tokens *tokens, char **error);
 int shell_parse(const char *text, Tokens *tokens, Pipeline *pipeline,
@@ -52,7 +58,7 @@ void shell_pipeline_free(Pipeline *pipeline);
 int shell_execute(ShellContext *shell, Pipeline *pipeline, int output_fd);
 int shell_run_line(ShellContext *shell, const char *line, int output_fd);
 int shell_expand_word(ShellContext *shell, const char *input_text,
-                      char **expanded_word, int output_fd, int *glob_eligible);
+                      char **expanded_word, int *glob_eligible);
 int shell_builtin(ShellContext *shell, char **arguments, int output_fd);
 int shell_builtin_multiwatch(ShellContext *shell, char **arguments,
                              int output_fd);

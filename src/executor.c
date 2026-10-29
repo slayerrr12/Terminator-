@@ -67,6 +67,23 @@ static int append_argument(char ***args, size_t *count, char *value) {
   return 0;
 }
 
+static char *join_path(const char *directory, const char *path) {
+  size_t path_size = strlen(directory) + strlen(path) + 2;
+  char *joined_path = malloc(path_size);
+  if (!joined_path)
+    return NULL;
+
+  snprintf(joined_path, path_size, "%s/%s", directory, path);
+  return joined_path;
+}
+
+static char *build_path_from_working_directory(const char *working_directory,
+                                               const char *path) {
+  if (path[0] == '/')
+    return strdup(path);
+  return join_path(working_directory, path);
+}
+
 static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
                                     int fd) {
   /* Expand each argument and glob eligible words before execvp(). */
@@ -75,34 +92,43 @@ static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
   for (size_t i = 0; i < command->argument_count; ++i) {
     char *word = NULL;
     int glob_eligible = 0;
-    if (shell_expand_word(shell, command->arguments[i], &word, fd,
-                          &glob_eligible) < 0)
+    if (shell_expand_word(shell, command->arguments[i], &word, &glob_eligible) <
+        0)
       goto fail;
     glob_t matches = {0};
-    char *pattern = NULL, *prefix = NULL;
+    char *pattern = NULL;
+    char *working_directory_prefix = NULL;
     int result = GLOB_NOMATCH;
     if (glob_eligible) {
       if (word[0] == '/')
         pattern = strdup(word);
-      else if (asprintf(&prefix, "%s/", shell->cwd) >= 0 &&
-               asprintf(&pattern, "%s%s", prefix, word) < 0) {
-        free(prefix);
-        prefix = NULL;
+      else {
+        working_directory_prefix =
+            build_path_from_working_directory(shell->working_directory, "");
+        pattern =
+            build_path_from_working_directory(shell->working_directory, word);
       }
-      if (pattern)
-        result = glob(pattern, 0, NULL, &matches);
+      if (!pattern || (word[0] != '/' && !working_directory_prefix)) {
+        free(pattern);
+        free(working_directory_prefix);
+        free(word);
+        goto fail;
+      }
+      result = glob(pattern, 0, NULL, &matches);
     }
     if (result == 0) {
       for (size_t j = 0; j < matches.gl_pathc; ++j) {
         const char *match = matches.gl_pathv[j];
-        if (prefix && !strncmp(match, prefix, strlen(prefix)))
-          match += strlen(prefix);
+        if (working_directory_prefix &&
+            !strncmp(match, working_directory_prefix,
+                     strlen(working_directory_prefix)))
+          match += strlen(working_directory_prefix);
         char *copy = strdup(match);
         if (!copy || append_argument(&arguments, &argument_count, copy) < 0) {
           free(copy);
           globfree(&matches);
           free(pattern);
-          free(prefix);
+          free(working_directory_prefix);
           free(word);
           goto fail;
         }
@@ -112,7 +138,7 @@ static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
         free(word);
         globfree(&matches);
         free(pattern);
-        free(prefix);
+        free(working_directory_prefix);
         goto fail;
       }
       word = NULL;
@@ -120,7 +146,7 @@ static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
     free(word);
     globfree(&matches);
     free(pattern);
-    free(prefix);
+    free(working_directory_prefix);
   }
   if (!arguments)
     arguments = calloc(1, sizeof(*arguments));
@@ -133,14 +159,14 @@ static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
   command->argument_count = argument_count;
   if (command->input_path) {
     char *expanded = NULL;
-    if (shell_expand_word(shell, command->input_path, &expanded, fd, NULL) < 0)
+    if (shell_expand_word(shell, command->input_path, &expanded, NULL) < 0)
       return -1;
     free(command->input_path);
     command->input_path = expanded;
   }
   if (command->output_path) {
     char *expanded = NULL;
-    if (shell_expand_word(shell, command->output_path, &expanded, fd, NULL) < 0)
+    if (shell_expand_word(shell, command->output_path, &expanded, NULL) < 0)
       return -1;
     free(command->output_path);
     command->output_path = expanded;
@@ -158,8 +184,9 @@ fail:
 
 static int run_command_in_child(ShellContext *shell, SimpleCommand *command,
                                 int output_fd) {
-  if (chdir(shell->cwd) < 0) {
-    dprintf(output_fd, "terminator: %s: %s\n", shell->cwd, strerror(errno));
+  if (chdir(shell->working_directory) < 0) {
+    dprintf(output_fd, "terminator: %s: %s\n", shell->working_directory,
+            strerror(errno));
     return 1;
   }
   if (redirection_apply(command, output_fd) < 0)
@@ -470,16 +497,6 @@ void shell_jobs_cleanup(ShellContext *shell) {
   }
 }
 
-static char *build_path_from_working_directory(const char *cwd,
-                                               const char *path) {
-  if (path[0] == '/')
-    return strdup(path);
-  char *joined = NULL;
-  if (asprintf(&joined, "%s/%s", cwd, path) < 0)
-    return NULL;
-  return joined;
-}
-
 int shell_execute(ShellContext *shell, Pipeline *pipeline, int output_fd) {
   if (!pipeline->count)
     return 0;
@@ -496,8 +513,8 @@ int shell_execute(ShellContext *shell, Pipeline *pipeline, int output_fd) {
     if (parent_builtin) {
       int target = output_fd, opened = -1;
       if (command->input_path) {
-        char *path =
-            build_path_from_working_directory(shell->cwd, command->input_path);
+        char *path = build_path_from_working_directory(shell->working_directory,
+                                                       command->input_path);
         int fd = path ? redirection_open_input(path, output_fd) : -1;
         free(path);
         if (fd < 0) {
@@ -507,8 +524,8 @@ int shell_execute(ShellContext *shell, Pipeline *pipeline, int output_fd) {
         close(fd);
       }
       if (command->output_path) {
-        char *path =
-            build_path_from_working_directory(shell->cwd, command->output_path);
+        char *path = build_path_from_working_directory(shell->working_directory,
+                                                       command->output_path);
         opened = path
                      ? redirection_open_output(path, command->append, output_fd)
                      : -1;

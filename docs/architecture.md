@@ -1,29 +1,82 @@
 # Architecture
 
-## Modules
+Terminator uses a small, conventional C layout. The current modules each have
+one main responsibility; related helpers stay together in their source file.
 
-- `src/main.c` parses the launch mode, initializes shared history, creates the first tab, and coordinates shutdown.
-- `src/gui.c` owns Xlib, text input, drawing, tab selection, and the `poll()` event loop.
-- `src/tab.c` owns per-tab pipes and starts, closes, and joins each worker thread or process.
-- `src/shell.c` reads framed commands, updates history, dispatches built-ins, and returns completion status to the GUI.
-- `src/parser.c` handles incomplete input, tokenization, quote-aware parsing, and word expansion.
-- `src/executor.c` handles command expansion, filename globs, redirection, pipeline setup, process groups, and background jobs.
-- `src/multiwatch.c` supervises concurrent command runs and forwards their output with `poll()`.
-- `src/history.c` stores bounded shared history and protects it with an unnamed POSIX semaphore.
-- `include/terminator.h` and `include/shell.h` define the interfaces shared by these modules.
+```text
+include/
+  terminator.h   Application, tab, history, and worker data structures
+  shell.h        Parser, command, shell-state, and job structures
+src/
+  main.c         Startup, mode selection, shared history, and shutdown
+  gui.c          X11 window, keyboard input, drawing, and event loop
+  tab.c          Per-tab pipes and worker thread/process lifecycle
+  shell.c        Shell worker, built-ins, and command-file execution
+  parser.c       Input completeness, tokenizing, parsing, and expansion
+  executor.c     Redirection, pipelines, child processes, and jobs
+  multiwatch.c   Concurrent command supervisor for multiWatch
+  history.c      Shared in-memory command history
+tests/           Worker checks and X11 interaction driver
+docs/            Task guide, architecture, design, and roadmap
+```
 
 ## Command flow
 
-The GUI sends a complete command to the selected worker over a pipe. A worker owns a `ShellContext` with its logical working directory, last exit status, and job table. The parser converts input into a `Pipeline` containing `SimpleCommand` values and an optional trailing background marker. The executor expands words, prepares redirections, and launches one child per pipeline stage. Every stage in a pipeline shares a process group. Foreground waits observe stopped children; background groups stay in the tab's job table for `jobs`, `fg`, and `bg`. The last stage's status becomes `$?`. The GUI collects output and completion status from every live tab without blocking X events.
+```mermaid
+flowchart LR
+    A[Keyboard] --> B[X11 GUI input buffer]
+    B -->|command pipe| C[Tab worker]
+    C --> D[parser.c]
+    D --> E[executor.c]
+    E -->|output pipe| F[GUI scrollback]
+    C -->|status pipe| B
+```
 
-State-changing and job-control built-ins run in the worker context for a single command. Pipeline stages and external commands run in children. Child processes change to the tab's logical cwd after `fork()`, so a `cd` in one tab cannot change another tab's directory.
+1. `gui.c` receives keyboard events, keeps the editable line, and sends a
+   complete command to the selected tab.
+2. `tab.c` connects the GUI and worker with three pipes: one for commands, one
+   for command output, and one for command status and the tab's working
+   directory.
+3. `shell.c` reads commands and keeps the state for that tab.
+4. `parser.c` turns the input into a `Pipeline` containing one or more
+   `SimpleCommand` values.
+5. `executor.c` applies redirection, creates pipeline processes, and waits for
+   foreground jobs. Output returns through the tab's output pipe.
 
-## Execution modes and shared history
+The GUI polls the X11 connection and every tab's output and status pipes. It
+sleeps while there is no input or output to process. Only the GUI calls Xlib.
 
-Both modes use the same worker, parser, executor, and history code. Thread mode starts a worker thread per tab and stores history in shared process memory. Process mode forks one worker per tab and maps history with `MAP_SHARED`. In both modes the shared history is guarded by a process-capable unnamed semaphore. Each tab's job table is private to its worker. Only the GUI thread calls Xlib.
+## Execution modes
 
-`multiWatch` starts a supervisor in its own process group. The supervisor launches the requested commands concurrently, polls their separate output pipes, and restarts each command two seconds after it exits. Ctrl+C targets that group, leaving the tab's shell worker alive.
+The command behavior is the same in both modes. The difference is how each
+tab's shell worker is started:
 
-## Extending the shell
+- **Thread mode** is the default. `tab.c` starts one POSIX thread per tab. The
+  threads share the process's history object.
+- **Process mode** is selected with `./terminator useProcess=True`. `tab.c`
+  forks one worker process per tab. History is stored in shared memory so the
+  workers and GUI can access the same ring.
 
-The parser, shell context, and GUI input cursor are the extension points for searchable history, completion, and script interpretation. The current history ring is fixed-size; a completion implementation can scan the tab's logical working directory and use the input word before the cursor as its prefix.
+In either mode, a worker owns a `ShellContext`. It contains the tab's logical
+working directory, last command status, and job table. A `cd` changes this
+context rather than the GUI process's current directory, so tabs keep separate
+working directories.
+
+## Shared history and signals
+
+`history.c` stores up to 1,024 commands in a ring. One unnamed POSIX semaphore
+protects both updates and snapshots. It is initialized for threads in thread
+mode and as process-shared in process mode.
+
+Each tab also has a shared foreground process-group ID. The GUI uses it to send
+Ctrl+C or Ctrl+Z to the active tab's foreground job. The worker remains alive
+to accept the next command. Background jobs are tracked by that tab's
+`ShellContext`, so `jobs`, `fg`, and `bg` affect only that tab.
+
+## Design boundary
+
+This is a shell window with command output, not a complete terminal emulator.
+It does not allocate a PTY or interpret the full terminal control protocol.
+The parser handles the shell syntax implemented for this project; it does not
+implement all of Bash. See [design.md](design.md) for details and
+[roadmap.md](roadmap.md) for remaining assignment tasks.

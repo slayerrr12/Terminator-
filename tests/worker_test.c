@@ -30,7 +30,7 @@ typedef struct {
 
 static void *thread_runner(void *arg) {
   WorkerArgs *a = arg;
-  worker_run(a->in, a->out, a->status, a->history, a->foreground, 0, a->cwd);
+  worker_run(a->in, a->out, a->status, a->history, a->foreground, a->cwd);
   free(a);
   return NULL;
 }
@@ -56,7 +56,7 @@ static Harness start_shared_worker(int process_mode, SharedHistory *history,
       close(in[1]);
       close(out[0]);
       close(status[0]);
-      worker_run(in[0], out[1], status[1], h.history, h.foreground, 0, cwd);
+      worker_run(in[0], out[1], status[1], h.history, h.foreground, cwd);
       _exit(0);
     }
     close(in[0]);
@@ -80,7 +80,7 @@ static Harness start_worker(int process_mode) {
   SharedHistory *history = mmap(NULL, sizeof(*history), PROT_READ | PROT_WRITE,
                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   assert(history != MAP_FAILED);
-  history_init(history, 1);
+  assert(history_init(history, 1) == 0);
   return start_shared_worker(process_mode, history, "/tmp");
 }
 
@@ -226,7 +226,7 @@ static void run_case(int process_mode) {
   unlink(path);
   rmdir(dir);
   free(result);
-  sem_destroy(&h.history->lock);
+  sem_destroy(&h.history->semaphore);
   munmap(h.history, sizeof(*h.history));
   munmap(h.foreground, sizeof(*h.foreground));
 }
@@ -235,7 +235,7 @@ static void test_two_tabs(int process_mode) {
   SharedHistory *history = mmap(NULL, sizeof(*history), PROT_READ | PROT_WRITE,
                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   assert(history != MAP_FAILED);
-  history_init(history, 1);
+  assert(history_init(history, 1) == 0);
   Harness one = start_shared_worker(process_mode, history, "/tmp");
   Harness two = start_shared_worker(process_mode, history, "/tmp");
   const char first[] = "cd /\necho from-one\n";
@@ -243,7 +243,7 @@ static void test_two_tabs(int process_mode) {
          (ssize_t)(sizeof(first) - 1));
   WorkerStatus status;
   assert(read(one.status, &status, sizeof(status)) == (ssize_t)sizeof(status));
-  assert(!strcmp(status.cwd, "/"));
+  assert(!strcmp(status.working_directory, "/"));
   assert(read(one.status, &status, sizeof(status)) == (ssize_t)sizeof(status));
   assert(write(one.in, "exit\n", 5) == 5);
   close(one.in);
@@ -278,7 +278,7 @@ static void test_two_tabs(int process_mode) {
   assert(strstr(output, "/tmp\n"));
   assert(strstr(output, "cd /\n"));
   assert(strstr(output, "echo from-one\n"));
-  sem_destroy(&history->lock);
+  sem_destroy(&history->semaphore);
   munmap(history, sizeof(*history));
   munmap(one.foreground, sizeof(*one.foreground));
   munmap(two.foreground, sizeof(*two.foreground));
@@ -306,7 +306,7 @@ static void test_clear_builtin(int process_mode) {
   } else {
     assert(pthread_join(h.thread, NULL) == 0);
   }
-  sem_destroy(&h.history->lock);
+  sem_destroy(&h.history->semaphore);
   munmap(h.history, sizeof(*h.history));
   munmap(h.foreground, sizeof(*h.foreground));
 }
@@ -315,7 +315,7 @@ static void test_interrupt_is_tab_scoped(int process_mode) {
   SharedHistory *history = mmap(NULL, sizeof(*history), PROT_READ | PROT_WRITE,
                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   assert(history != MAP_FAILED);
-  history_init(history, 1);
+  assert(history_init(history, 1) == 0);
   Harness h = start_shared_worker(process_mode, history, "/tmp");
   Harness other = start_shared_worker(process_mode, history, "/tmp");
   assert(write(h.in, "sleep 10\n", 9) == 9);
@@ -375,7 +375,7 @@ static void test_interrupt_is_tab_scoped(int process_mode) {
   }
   assert(strstr(output, "survived\n"));
   assert(strstr(other_output, "other-survived\n"));
-  sem_destroy(&history->lock);
+  sem_destroy(&history->semaphore);
   munmap(history, sizeof(*history));
   munmap(h.foreground, sizeof(*h.foreground));
   munmap(other.foreground, sizeof(*other.foreground));
@@ -437,7 +437,7 @@ static void test_job_control(int process_mode) {
   assert(strstr(output, "Stopped"));
   assert(strstr(output, "sleep 10"));
   assert(strstr(output, "&"));
-  sem_destroy(&h.history->lock);
+  sem_destroy(&h.history->semaphore);
   munmap(h.history, sizeof(*h.history));
   munmap(h.foreground, sizeof(*h.foreground));
 }
@@ -497,7 +497,7 @@ static void test_multiwatch_interrupt(int process_mode) {
   }
   assert(strstr(output, "\"echo watched\""));
   assert(strstr(output, "\"echo second\""));
-  sem_destroy(&h.history->lock);
+  sem_destroy(&h.history->semaphore);
   munmap(h.history, sizeof(*h.history));
   munmap(h.foreground, sizeof(*h.foreground));
 }

@@ -8,41 +8,76 @@
 #include <unistd.h>
 
 /* Built-ins and the worker loop that connects one tab to the shell engine. */
+static char *join_path(const char *directory, const char *name) {
+  size_t path_size = strlen(directory) + strlen(name) + 2;
+  char *path = malloc(path_size);
+  if (!path)
+    return NULL;
+
+  snprintf(path, path_size, "%s/%s", directory, name);
+  return path;
+}
+
+static char *make_path_from_working_directory(const char *working_directory,
+                                              const char *path) {
+  if (path[0] == '/')
+    return strdup(path);
+  return join_path(working_directory, path);
+}
+
+static int resolve_directory(const char *path, char *resolved_path) {
+  struct stat path_info;
+  if (stat(path, &path_info) < 0)
+    return -1;
+  if (!S_ISDIR(path_info.st_mode)) {
+    errno = ENOTDIR;
+    return -1;
+  }
+  return realpath(path, resolved_path) ? 0 : -1;
+}
+
 static int builtin_cd(ShellContext *shell, char **arguments, int output_fd) {
-  const char *dest = arguments[1] ? arguments[1] : getenv("HOME");
-  if (!dest) {
+  const char *destination = arguments[1] ? arguments[1] : getenv("HOME");
+  if (!destination) {
     dprintf(output_fd, "terminator: cd: HOME not set\n");
     return 1;
   }
-  char *expanded = NULL;
-  if (dest[0] == '~' && (dest[1] == '/' || dest[1] == '\0')) {
+
+  char *expanded_destination = NULL;
+  if (destination[0] == '~' &&
+      (destination[1] == '/' || destination[1] == '\0')) {
     const char *home = getenv("HOME");
-    if (home && asprintf(&expanded, "%s%s", home, dest + 1) >= 0)
-      dest = expanded;
+    if (home) {
+      size_t path_size = strlen(home) + strlen(destination + 1) + 1;
+      expanded_destination = malloc(path_size);
+      if (!expanded_destination) {
+        dprintf(output_fd, "terminator: cd: out of memory\n");
+        return 1;
+      }
+      snprintf(expanded_destination, path_size, "%s%s", home, destination + 1);
+      destination = expanded_destination;
+    }
   }
-  char *candidate = NULL;
-  if (dest[0] == '/')
-    candidate = strdup(dest);
-  else if (asprintf(&candidate, "%s/%s", shell->cwd, dest) < 0)
-    candidate = NULL;
+
+  char *candidate =
+      make_path_from_working_directory(shell->working_directory, destination);
   char resolved[PATH_MAX];
-  struct stat st;
-  if (!candidate || stat(candidate, &st) < 0 || !S_ISDIR(st.st_mode) ||
-      !realpath(candidate, resolved)) {
-    int err = errno ? errno : ENOTDIR;
-    dprintf(output_fd, "terminator: cd: %s: %s\n", dest, strerror(err));
-    free(expanded);
+  if (!candidate || resolve_directory(candidate, resolved) < 0) {
+    int error_number = errno ? errno : ENOMEM;
+    dprintf(output_fd, "terminator: cd: %s: %s\n", destination,
+            strerror(error_number));
+    free(expanded_destination);
     free(candidate);
     return 1;
   }
-  if (strlen(resolved) >= sizeof(shell->cwd)) {
+  if (strlen(resolved) >= sizeof(shell->working_directory)) {
     dprintf(output_fd, "terminator: cd: path is too long\n");
-    free(expanded);
+    free(expanded_destination);
     free(candidate);
     return 1;
   }
-  strcpy(shell->cwd, resolved);
-  free(expanded);
+  strcpy(shell->working_directory, resolved);
+  free(expanded_destination);
   free(candidate);
   return 0;
 }
@@ -82,11 +117,8 @@ static int builtin_source(ShellContext *shell, char **arguments,
     dprintf(output_fd, "terminator: source: filename required\n");
     return 2;
   }
-  char *path = NULL;
-  if (arguments[1][0] == '/')
-    path = strdup(arguments[1]);
-  else if (asprintf(&path, "%s/%s", shell->cwd, arguments[1]) < 0)
-    path = NULL;
+  char *path =
+      make_path_from_working_directory(shell->working_directory, arguments[1]);
   FILE *file = path ? fopen(path, "r") : NULL;
   if (!file) {
     dprintf(output_fd, "terminator: source: %s: %s\n", arguments[1],
@@ -147,11 +179,12 @@ typedef struct {
 } BuiltinEntry;
 /* Keep built-in lookup table-driven so adding a command stays local. */
 static const BuiltinEntry builtins[] = {
-    {"cd", builtin_cd},        {"clear", builtin_clear},
-    {"exit", builtin_exit},    {"history", builtin_history},
-    {"jobs", builtin_jobs},    {"fg", builtin_fg},
-    {"bg", builtin_bg},        {"multiWatch", shell_builtin_multiwatch},
-    {"source", builtin_source}};
+    {"cd", builtin_cd},         {"clear", builtin_clear},
+    {"exit", builtin_exit},     {"history", builtin_history},
+    {"jobs", builtin_jobs},     {"fg", builtin_fg},
+    {"bg", builtin_bg},         {"multiWatch", shell_builtin_multiwatch},
+    {"source", builtin_source},
+};
 
 int shell_builtin(ShellContext *shell, char **arguments, int output_fd) {
   if (!arguments || !arguments[0])
@@ -170,53 +203,57 @@ int shell_builtin(ShellContext *shell, char **arguments, int output_fd) {
 
 void worker_run(int input_fd, int output_fd, int status_fd,
                 SharedHistory *history, SharedForeground *foreground,
-                int tab_id, const char *working_directory) {
+                const char *working_directory) {
   /* Read newline-framed commands and report status/cwd back to the GUI. */
   ShellContext shell = {0};
   shell.history = history;
   shell.foreground = foreground;
   shell.last_status = 0;
-  strncpy(shell.cwd, working_directory, sizeof(shell.cwd) - 1);
-  char line[TERM_LINE_MAX];
-  size_t n = 0;
-  (void)tab_id;
+  snprintf(shell.working_directory, sizeof(shell.working_directory), "%s",
+           working_directory);
+  char command_buffer[TERM_LINE_MAX];
+  size_t command_length = 0;
   for (;;) {
-    char ch;
-    ssize_t r = read(input_fd, &ch, 1);
-    if (r == 0)
+    char character;
+    ssize_t bytes_read = read(input_fd, &character, 1);
+    if (bytes_read == 0)
       break;
-    if (r < 0) {
+    if (bytes_read < 0) {
       if (errno == EINTR)
         continue;
       break;
     }
-    if (ch == '\n') {
-      line[n] = 0;
-      if (!shell_is_complete(line)) {
-        if (n && line[n - 1] == '\\')
-          n--;
-        else if (n + 1 < sizeof(line))
-          line[n++] = '\n';
+    if (character == '\n') {
+      command_buffer[command_length] = '\0';
+      if (!shell_is_complete(command_buffer)) {
+        if (command_length && command_buffer[command_length - 1] == '\\')
+          command_length--;
+        else if (command_length + 1 < sizeof(command_buffer))
+          command_buffer[command_length++] = '\n';
         continue;
       }
       int status = shell.last_status;
-      if (n) {
-        history_add(history, line);
-        status = shell_run_line(&shell, line, output_fd);
+      if (command_length) {
+        history_add(history, command_buffer);
+        status = shell_run_line(&shell, command_buffer, output_fd);
       }
-      n = 0;
+      command_length = 0;
       WorkerStatus message = {.status = status,
                               .clear_screen = shell.clear_requested};
-      size_t cwd_len = strnlen(shell.cwd, sizeof(message.cwd) - 1);
-      memcpy(message.cwd, shell.cwd, cwd_len);
-      message.cwd[cwd_len] = '\0';
+      size_t working_directory_length = strlen(shell.working_directory);
+      if (working_directory_length >= sizeof(message.working_directory))
+        working_directory_length = sizeof(message.working_directory) - 1;
+      memcpy(message.working_directory, shell.working_directory,
+             working_directory_length);
+      message.working_directory[working_directory_length] = '\0';
       ssize_t ignored = write(status_fd, &message, sizeof(message));
       (void)ignored;
       shell.clear_requested = 0;
       if (shell.should_exit)
         break;
-    } else if (n + 1 < sizeof(line))
-      line[n++] = ch;
+    } else if (command_length + 1 < sizeof(command_buffer)) {
+      command_buffer[command_length++] = character;
+    }
   }
   shell_jobs_cleanup(&shell);
   close(input_fd);

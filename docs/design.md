@@ -1,23 +1,86 @@
-# Design decisions
+# Design notes
 
-## GUI and tabs
+This document explains the choices made in the current implementation. For a
+beginner-oriented walkthrough of each task, see
+[TASK_IMPLEMENTATION_README.md](TASK_IMPLEMENTATION_README.md).
 
-The application uses one Xlib window with one bounded text buffer per tab. The GUI polls the X connection and each tab's output and status pipes, so an idle application sleeps and worker output does not block input handling. The GUI owns all drawing and Xlib calls. A fixed X font and simple text rendering keep the implementation small; this is not a PTY-backed terminal emulator.
+## Window and tabs
 
-Tabs have independent input pipes, output pipes, shell contexts, logical working directories, and job tables. Thread mode runs a worker thread per tab. Process mode runs a worker process per tab. The GUI relays Ctrl+C and Ctrl+Z to the active tab's foreground process group and closes that tab's worker when requested.
+`gui.c` owns the X11 display, window, keyboard input, drawing, and event loop.
+It keeps an editable input buffer and a scrollback buffer for each tab. When a
+command is complete, the GUI writes it to that tab's command pipe. The worker
+returns output and a small status message through two other pipes.
 
-## Shell and execution
+The event loop uses `poll()` for both the X11 connection and worker pipes. This
+lets the window receive keyboard events while commands produce output, without
+checking the pipes in a tight loop. Tabs stay active when hidden because their
+workers are independent of which tab is currently drawn.
 
-The parser tracks quotes, escapes, and nested command substitutions before splitting words, pipes, and redirection operators. It retains raw words until expansion so quoted wildcards stay literal. Expansion supports environment variables, `$?`, nested command substitution, and globbing relative to the tab's logical directory.
+The window draws text directly with Xlib. It has no PTY, terminal mode, or
+ANSI control-sequence interpreter, so full-screen interactive programs are
+outside the current design.
 
-The executor creates `N-1` pipes for a pipeline of `N` commands, forks each stage, wires descriptors with `dup2()`, applies per-stage input/output redirection, and waits for the foreground process group. A failed input open reports an error and does not launch the command. A trailing `&` leaves a process group running in the background and records its ID, process group, state, last-stage PID, and command text in that tab's fixed-size job table. `jobs` reaps completed children, `fg` resumes and waits for a job, and `bg` resumes it without waiting. `source` reads and executes complete commands in the current worker context.
+## Worker modes and shared state
 
-`multiWatch` accepts a bracketed list of command strings. A separate supervisor launches one process per command, uses a `poll()` loop over individual output pipes, and restarts completed commands after two seconds. The GUI sends Ctrl+C to the supervisor's process group; the worker remains available for another command.
+`./terminator` starts one worker thread for each tab. The threads share the
+application's history object. `./terminator useProcess=True` starts each tab
+worker with `fork()`; the history object then lives in `MAP_SHARED` memory.
 
-## History and shared state
+Each tab has a `ShellContext` containing its working directory, last exit
+status, and job table. The GUI's process directory is not changed by `cd`.
+External commands run in child processes and call `chdir()` to the tab's
+working directory before execution.
 
-History is an in-memory ring with 1,024 entries. One unnamed semaphore protects updates and snapshots. Thread mode initializes it for threads in the process; process mode places the ring in shared anonymous memory and initializes a process-shared semaphore. Filename completion is not implemented in this milestone; it can use the current tab's input prefix and logical cwd to scan directory entries without adding persistent global state.
+`SharedHistory` is a fixed-size ring with 1,024 entries. The same unnamed POSIX
+semaphore protects history reads and writes in both modes. In process mode,
+the semaphore is initialized with process sharing enabled.
 
-## Limits
+## Parsing and expansion
 
-The parser implements the project's current shell subset, not full Bash grammar. It does not yet parse conditional command lists, shell assignments, or compound script syntax. Job control supports background pipelines and stop/continue signals but does not provide terminal foreground ownership through a PTY. There is no PTY, terminal mode negotiation, full screen-buffer model, or complete keyboard protocol. The history ring is not persisted to disk. Later assignment features are listed in [roadmap.md](roadmap.md).
+`parser.c` first checks whether the input is complete. It tracks open quotes,
+backticks, escapes, and nested `$()` substitutions so the GUI can keep
+collecting multiline input. The lexer keeps quoted text together and separates
+operators such as `|`, `<`, `>`, `>>`, and `&`. The parser groups tokens into
+commands and a pipeline.
+
+Before execution, the shell expands environment variables, `$?`, command
+substitutions, and eligible wildcard patterns. This is a deliberate shell
+subset. It does not implement every Bash expansion or grammar rule.
+
+## Processes, pipelines, and redirection
+
+`executor.c` launches external commands with `fork()` and `execvp()`. A
+pipeline with N commands uses N-1 pipes and starts one child process for each
+command. The child connects its standard input and output with `dup2()`, then
+applies any file redirections.
+
+Input redirection opens the requested file for reading. Output redirection
+creates or truncates a file; `>>` appends. A failed input open is reported and
+the command is not started. The output pipe connects command output back to the
+GUI.
+
+Each pipeline shares a process group. The worker waits for foreground jobs and
+records background jobs in its own fixed-size table. `jobs` checks job states,
+`fg` resumes and waits for one job, and `bg` resumes it without waiting. The
+GUI sends Ctrl+C and Ctrl+Z to the selected tab's foreground process group.
+
+## `multiWatch`
+
+`multiwatch.c` starts one child process for each command string. Each child has
+its own output pipe. A supervisor polls those pipes and forwards ready output
+to the tab. When a command exits, the supervisor starts it again after two
+seconds. Ctrl+C targets the supervisor's process group; the tab worker remains
+available for the next command.
+
+## Current limits
+
+- History is shared between tabs but is only stored in memory. It keeps at
+  most 1,024 commands and is cleared when the application exits.
+- `source` executes complete input lines with the current shell parser. It is
+  not the custom Bash-subset script interpreter in the assignment.
+- Hotkeys cannot be configured or saved. History search and filename
+  completion are not implemented.
+- Background jobs use process groups and signals, but there is no PTY to
+  provide full interactive terminal job control.
+
+These limits are summarized by assignment task in [roadmap.md](roadmap.md).

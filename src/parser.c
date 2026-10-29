@@ -6,12 +6,20 @@
  * Converts shell text into tokens and pipeline structures. This module parses
  * syntax and expands words; process creation is handled by executor.c.
  */
-static int append_token(Tokens *tokens, const char *text, size_t length) {
+static char *copy_text(const char *text, size_t length) {
   char *copy = malloc(length + 1);
   if (!copy)
-    return -1;
+    return NULL;
+
   memcpy(copy, text, length);
   copy[length] = '\0';
+  return copy;
+}
+
+static int append_token(Tokens *tokens, const char *text, size_t length) {
+  char *copy = copy_text(text, length);
+  if (!copy)
+    return -1;
   char **items = realloc(tokens->items, (tokens->count + 1) * sizeof(*items));
   if (!items) {
     free(copy);
@@ -298,17 +306,24 @@ static int contains_wildcard(const char *text) {
   return 0;
 }
 static int capture_command_output(ShellContext *shell, const char *command_text,
-                                  size_t command_length, char **captured_output,
-                                  int output_fd) {
+                                  size_t command_length,
+                                  char **captured_output) {
   /* Run $(...) in a child and capture its output for the containing word. */
   int capture_pipe[2];
   if (pipe(capture_pipe) < 0)
     return -1;
   pid_t pid = fork();
+  if (pid < 0) {
+    int saved_errno = errno;
+    close(capture_pipe[0]);
+    close(capture_pipe[1]);
+    errno = saved_errno;
+    return -1;
+  }
   if (pid == 0) {
     close(capture_pipe[0]);
     ShellContext child_shell = *shell;
-    char *nested_command = strndup(command_text, command_length);
+    char *nested_command = copy_text(command_text, command_length);
     int command_status =
         nested_command
             ? shell_run_line(&child_shell, nested_command, capture_pipe[1])
@@ -321,27 +336,46 @@ static int capture_command_output(ShellContext *shell, const char *command_text,
   char *capture_buffer = NULL;
   size_t captured_length = 0, capture_capacity = 0;
   char read_buffer[512];
-  ssize_t bytes_read;
-  while ((bytes_read =
-              read(capture_pipe[0], read_buffer, sizeof(read_buffer))) > 0)
-    if (append_to_buffer(&capture_buffer, &captured_length, &capture_capacity,
-                         read_buffer, (size_t)bytes_read) < 0)
-      break;
+  int capture_failed = 0;
+  for (;;) {
+    ssize_t bytes_read =
+        read(capture_pipe[0], read_buffer, sizeof(read_buffer));
+    if (bytes_read > 0) {
+      if (!capture_failed &&
+          append_to_buffer(&capture_buffer, &captured_length, &capture_capacity,
+                           read_buffer, (size_t)bytes_read) < 0)
+        capture_failed = 1;
+      continue;
+    }
+    if (bytes_read < 0 && errno == EINTR)
+      continue;
+    if (bytes_read < 0)
+      capture_failed = 1;
+    break;
+  }
   close(capture_pipe[0]);
-  int child_status;
-  while (waitpid(pid, &child_status, 0) < 0 && errno == EINTR) {
+  while (waitpid(pid, NULL, 0) < 0) {
+    if (errno == EINTR)
+      continue;
+    capture_failed = 1;
+    break;
+  }
+  if (capture_failed) {
+    free(capture_buffer);
+    return -1;
   }
   if (!capture_buffer)
     capture_buffer = strdup("");
+  if (!capture_buffer)
+    return -1;
   while (captured_length && (capture_buffer[captured_length - 1] == '\n' ||
                              capture_buffer[captured_length - 1] == '\r'))
     capture_buffer[--captured_length] = 0;
   *captured_output = capture_buffer;
-  (void)output_fd;
   return 0;
 }
 int shell_expand_word(ShellContext *shell, const char *input_text,
-                      char **expanded_word, int output_fd, int *glob_eligible) {
+                      char **expanded_word, int *glob_eligible) {
   /* Remove quote syntax and expand variables, substitutions, and escapes. */
   char *expanded_buffer = NULL;
   size_t buffer_length = 0, buffer_capacity = 0;
@@ -402,7 +436,7 @@ int shell_expand_word(ShellContext *shell, const char *input_text,
         char *expansion_value = NULL;
         if (capture_command_output(shell, input_text + input_index + 2,
                                    scan_index - input_index - 3,
-                                   &expansion_value, output_fd) < 0)
+                                   &expansion_value) < 0)
           goto fail;
         if (!active_quote && contains_wildcard(expansion_value))
           glob_active = 1;
@@ -468,8 +502,8 @@ int shell_expand_word(ShellContext *shell, const char *input_text,
         goto fail;
       char *expansion_value = NULL;
       if (capture_command_output(shell, input_text + input_index + 1,
-                                 scan_index - input_index - 1, &expansion_value,
-                                 output_fd) < 0)
+                                 scan_index - input_index - 1,
+                                 &expansion_value) < 0)
         goto fail;
       if (!active_quote && contains_wildcard(expansion_value))
         glob_active = 1;

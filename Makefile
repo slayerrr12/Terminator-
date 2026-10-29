@@ -1,6 +1,6 @@
 # C compiler and options used to build the project.
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Iinclude \
+CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -pthread -Iinclude \
 	-D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
 
 # Libraries used by the GUI and thread support.

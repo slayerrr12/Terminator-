@@ -11,47 +11,71 @@
 #define TERM_HISTORY_CAP 1024
 #define TERM_LINE_MAX 8192
 #define TERM_CWD_MAX 1024
+#define TERM_PATH_BUFFER 4096
+
 typedef struct {
-  int status;       /* Exit status of the command just handled. */
-  int clear_screen; /* GUI should clear this tab's scrollback when nonzero. */
-  char cwd[TERM_CWD_MAX]; /* Updated logical working directory. */
+  int status;
+  int clear_screen;
+  char working_directory[TERM_CWD_MAX];
 } WorkerStatus;
+
 typedef struct {
   atomic_int pgid;
 } SharedForeground;
+
 extern volatile sig_atomic_t terminator_stopping;
+
 typedef struct {
-  sem_t lock;
-  size_t count;
-  size_t next;
+  sem_t semaphore;
+  size_t entry_count;
+  size_t next_entry;
   char entries[TERM_HISTORY_CAP][TERM_LINE_MAX];
 } SharedHistory;
+
 typedef enum { MODE_THREADS, MODE_PROCESSES } ExecutionMode;
+
 typedef struct {
-  int id, input_fd, output_fd, status_fd;
-  int worker_input_fd, worker_output_fd, worker_status_fd;
-  pid_t pid;
-  pthread_t thread;
-  int is_thread, alive, busy;
+  /* Pipe ends used by the GUI. */
+  int gui_to_worker_fd;
+  int worker_to_gui_fd;
+  int status_from_worker_fd;
+
+  /* Pipe ends used by a worker thread in thread mode. */
+  int worker_input_fd;
+  int worker_output_fd;
+  int worker_status_fd;
+
+  pid_t worker_pid;
+  pthread_t worker_thread;
+  int worker_is_thread;
+  int command_is_running;
   SharedHistory *history;
   SharedForeground *foreground;
-  char cwd[4096];
-  char input[TERM_LINE_MAX];
-  size_t input_len, cursor;
-  char multiline[TERM_LINE_MAX];
-  size_t multiline_len;
-  char **lines;
-  size_t line_count, line_cap, scroll;
+  char working_directory[TERM_PATH_BUFFER];
+
+  char input_buffer[TERM_LINE_MAX];
+  size_t input_length;
+  size_t input_cursor;
+
+  char multiline_buffer[TERM_LINE_MAX];
+  size_t multiline_length;
+
+  char **output_lines;
+  size_t output_line_count;
+  size_t output_line_capacity;
+  size_t scroll_offset;
 } Tab;
+
 typedef struct {
   ExecutionMode mode;
   SharedHistory *history;
   Tab tabs[TERM_MAX_TABS];
-  size_t count, active;
-  int x_fd;
+  size_t tab_count;
+  size_t active_tab;
+  int x11_connection_fd;
 } App;
 
-void history_init(SharedHistory *history, int process_shared);
+int history_init(SharedHistory *history, int process_shared);
 void history_add(SharedHistory *history, const char *line);
 size_t history_snapshot(SharedHistory *history, char (*snapshot)[TERM_LINE_MAX],
                         size_t max_entries);
@@ -60,6 +84,6 @@ void app_close_tab(App *app, size_t tab_index);
 void app_shutdown(App *app);
 void worker_run(int input_fd, int output_fd, int status_fd,
                 SharedHistory *history, SharedForeground *foreground,
-                int tab_id, const char *working_directory);
+                const char *working_directory);
 int gui_run(App *app);
 #endif
