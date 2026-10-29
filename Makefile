@@ -1,31 +1,39 @@
-CC ?= cc
-CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -Iinclude
-CFLAGS ?= -O2 -g
-CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes -pthread -MMD -MP
-LDLIBS += -lX11 -pthread
+# C compiler and options used to build the project.
+CC = gcc
+CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Iinclude \
+	-D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
 
-SOURCES := src/main.c src/gui.c src/tab.c src/parser.c src/executor.c \
-	src/shell.c src/multiwatch.c src/history.c
-OBJECTS := $(SOURCES:src/%.c=build/%.o)
-WORKER_SOURCES := src/parser.c src/executor.c src/shell.c src/multiwatch.c \
-	src/history.c
+# Libraries used by the GUI and thread support.
+LIBRARIES = -lX11 -pthread
 
-.PHONY: all clean test
+# All source files that make up the terminal application.
+SOURCES = src/main.c src/gui.c src/tab.c src/parser.c \
+	src/executor.c src/shell.c src/multiwatch.c src/history.c
+
+# Source files needed by the shell worker test.
+WORKER_SOURCES = src/parser.c src/executor.c src/shell.c \
+	src/multiwatch.c src/history.c
+
+# Running "make" builds the application.
+.PHONY: all run clean test
 all: terminator
-terminator: $(OBJECTS)
-	$(CC) $(LDFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 
-build/%.o: src/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+# Compile and link every source file into one executable.
+terminator: $(SOURCES) include/terminator.h include/shell.h
+	$(CC) $(CFLAGS) $(SOURCES) -o terminator $(LIBRARIES)
 
--include $(OBJECTS:.o=.d)
+# Build the application if needed, then start it.
+run: terminator
+	./terminator
 
+# Remove the executable and generated test files.
 clean:
 	rm -rf build terminator
 
+# Build and run the project's existing checks.
 test: terminator
-	$(CC) $(CPPFLAGS) $(CFLAGS) tests/worker_test.c $(WORKER_SOURCES) \
-		-o build/worker_test
+	mkdir -p build
+	$(CC) $(CFLAGS) tests/worker_test.c $(WORKER_SOURCES) \
+		-o build/worker_test -pthread
 	timeout 20s ./build/worker_test
 	./tests/integration.sh
