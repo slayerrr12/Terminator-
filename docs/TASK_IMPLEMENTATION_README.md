@@ -107,8 +107,10 @@ other tabs' output.
 
 The GUI creates one X11 window and draws a tab bar, text output, the prompt,
 the editable input, and the input cursor. Each `Tab` stores its own input
-buffer and up to 10,000 lines of output. Clicking a tab changes which tab is
-drawn and receives keyboard input. The other tabs' workers continue running.
+buffer and up to 10,000 lines of output within a 1 MiB allocated-text budget.
+If one output line exceeds that budget, the buffer keeps its tail. Clicking a
+tab changes which tab is drawn and receives keyboard input. The other tabs'
+workers continue running.
 The mouse wheel and Page Up/Page Down scroll the active tab. If output arrives
 while the user is looking at earlier lines, the viewport stays on the same
 content. Returning to the bottom resumes following output.
@@ -126,8 +128,8 @@ the same descriptors.
 
 - `src/gui.c`: `gui_run`, `handle_key_press`, `draw_terminal_window`,
   `submit_input`, and `append_output_text`.
-- `src/scrollback.c`: line storage, the 10,000-line limit, viewport position,
-  and follow-output behavior.
+- `src/scrollback.c`: line storage, the 10,000-line and 1 MiB per-tab limits,
+  viewport position, and follow-output behavior.
 - `src/tab.c`: `app_add_tab` and `app_close_tab`.
 - `include/terminator.h`: the `App` and `Tab` data structures.
 

@@ -47,8 +47,10 @@ flowchart LR
 
 The GUI polls the X11 connection and every tab's output and status pipes. It
 sleeps while there is no input or output to process. Only the GUI calls Xlib.
-Each tab owns its own 10,000-line scrollback ring. The GUI draws the active
-tab's visible slice and tracks its first visible line while output continues.
+Each tab owns its own scrollback ring, limited to 10,000 lines and 1 MiB of
+allocated line text. The GUI draws the active tab's visible slice and tracks
+its first visible line while output continues. For a line larger than the
+budget, the buffer keeps its tail and evicts older lines as needed.
 The mouse wheel and Page Up/Page Down move that view; reaching the bottom turns
 follow-output back on.
 

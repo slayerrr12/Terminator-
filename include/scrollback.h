@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #define TERM_SCROLLBACK_MAX_LINES 10000
+#define TERM_SCROLLBACK_MAX_BYTES (1024 * 1024)
 
 typedef struct {
   char *text;
@@ -17,6 +18,7 @@ typedef struct {
   size_t line_capacity;
   size_t oldest_line;
   size_t first_visible_line;
+  size_t stored_bytes;
   int follows_output;
 } Scrollback;
 

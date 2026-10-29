@@ -1,6 +1,7 @@
 #include "scrollback.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void append(Scrollback *scrollback, const char *text) {
@@ -123,12 +124,33 @@ static void test_keeps_newest_ten_thousand_lines(void) {
   scrollback_destroy(&scrollback);
 }
 
+static void test_caps_memory_for_a_very_long_line(void) {
+  Scrollback scrollback;
+  scrollback_init(&scrollback);
+  size_t input_length = TERM_SCROLLBACK_MAX_BYTES + 200;
+  char *text = malloc(input_length);
+  assert(text);
+  memset(text, 'x', input_length);
+  text[input_length - 1] = 'z';
+
+  assert(scrollback_append_text(&scrollback, text, input_length) == 0);
+  assert(scrollback.stored_bytes <= TERM_SCROLLBACK_MAX_BYTES);
+  assert(strlen(scrollback_get_line(&scrollback, 0)) ==
+         TERM_SCROLLBACK_MAX_BYTES - 1);
+  assert(scrollback_get_line(&scrollback, 0)[TERM_SCROLLBACK_MAX_BYTES - 2] ==
+         'z');
+
+  free(text);
+  scrollback_destroy(&scrollback);
+}
+
 int main(void) {
   test_appends_and_independent_buffers();
   test_text_split_across_pipe_reads_and_terminal_controls();
   test_view_stays_on_same_line_when_output_arrives();
   test_page_controls_and_clear();
   test_keeps_newest_ten_thousand_lines();
+  test_caps_memory_for_a_very_long_line();
   puts("scrollback tests passed");
   return 0;
 }

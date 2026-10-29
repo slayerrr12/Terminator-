@@ -40,7 +40,8 @@ it. `make clean` removes the executable and generated build files.
   to stop it.
 - Use **Up** and **Down** to move 10 lines at a time, **Page Up/Page Down** to
   move by a screen, or the mouse wheel to move 3 lines per notch. Each tab
-  keeps up to 10,000 lines of output.
+  keeps up to 10,000 lines of output within a 1 MiB scrollback text budget.
+  If one line exceeds that budget, its oldest characters are discarded.
 
 ## Implemented features
 

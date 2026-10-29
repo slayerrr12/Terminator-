@@ -8,11 +8,13 @@ beginner-oriented walkthrough of each task, see
 
 `gui.c` owns the X11 display, window, keyboard input, drawing, and event loop.
 It keeps an editable input buffer and a scrollback buffer for each tab.
-`scrollback.c` stores up to 10,000 lines in a ring, so old output is evicted
-without moving every remaining line. Each tab tracks whether it follows new
-output or is showing an earlier line. In the latter case, output arriving
-later does not move the viewed line. The mouse wheel and Page Up/Page Down
-control the view; scrolling back to the bottom resumes following output. When
+`scrollback.c` stores up to 10,000 lines and 1 MiB of allocated line text per
+tab in a ring, so old output is evicted without moving every remaining line.
+For a line larger than that byte budget, it keeps the tail. Each tab tracks
+whether it follows new output or is showing an earlier line. In the latter
+case, output arriving later does not move the viewed line. The mouse wheel and
+Page Up/Page Down control the view; scrolling back to the bottom resumes
+following output. When
 a command is complete, the GUI writes it to that tab's command pipe. The worker
 returns output and a small status message through two other pipes.
 
