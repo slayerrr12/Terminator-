@@ -74,7 +74,7 @@ static int builtin_history(ShellContext *ctx, char **argv, int out) {
 }
 
 static int builtin_source(ShellContext *ctx, char **argv, int out) {
-  /* Read and execute complete commands from a file in the tab's shell context. */
+  /* Run complete commands from a file in this tab's shell context. */
   if (!argv[1]) {
     dprintf(out, "terminator: source: filename required\n");
     return 2;
@@ -143,14 +143,10 @@ typedef struct {
 } BuiltinEntry;
 /* Keep built-in lookup table-driven so adding a command stays local. */
 static const BuiltinEntry builtins[] = {
-    {"cd", builtin_cd},
-    {"clear", builtin_clear},
-    {"exit", builtin_exit},
-    {"history", builtin_history},
-    {"jobs", builtin_jobs},
-    {"fg", builtin_fg},
-    {"bg", builtin_bg},
-    {"multiWatch", shell_builtin_multiwatch},
+    {"cd", builtin_cd},        {"clear", builtin_clear},
+    {"exit", builtin_exit},    {"history", builtin_history},
+    {"jobs", builtin_jobs},    {"fg", builtin_fg},
+    {"bg", builtin_bg},        {"multiWatch", shell_builtin_multiwatch},
     {"source", builtin_source}};
 
 int shell_builtin(ShellContext *ctx, char **argv, int out) {

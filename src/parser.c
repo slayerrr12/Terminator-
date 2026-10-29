@@ -59,7 +59,7 @@ int shell_is_complete(const char *text) {
   return !quote && !escaped && !backtick && depth == 0;
 }
 
-/* Split operators and words while keeping quoted operators inside their word. */
+/* Split operators while keeping quoted operators inside words. */
 int shell_lex(const char *text, Tokens *tokens, char **error) {
   memset(tokens, 0, sizeof(*tokens));
   if (error)
@@ -149,7 +149,7 @@ oom:
 #include <stdlib.h>
 #include <string.h>
 
-/* Assemble lexer tokens into commands, redirections, pipes, and trailing '&'. */
+/* Build commands, redirections, pipes, and trailing '&' from tokens. */
 int shell_parse(const char *text, Tokens *tokens, Pipeline *out, char **error) {
   memset(out, 0, sizeof(*out));
   out->source = strdup(text);

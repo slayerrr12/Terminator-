@@ -25,8 +25,7 @@ static int add_line(Tab *t) {
   /* Bound per-tab scrollback while keeping the newest rows. */
   if (t->line_count == 4000) {
     free(t->lines[0]);
-    memmove(t->lines, t->lines + 1,
-            (t->line_count - 1) * sizeof(*t->lines));
+    memmove(t->lines, t->lines + 1, (t->line_count - 1) * sizeof(*t->lines));
     t->line_count--;
     if (t->scroll)
       t->scroll--;
@@ -76,8 +75,7 @@ static void clear_scrollback(Tab *t) {
 static void add_text(Tab *t, const char *s, size_t n) {
   size_t start = 0;
   for (size_t i = 0; i <= n; i++) {
-    if (i < n && s[i] != '\n' && s[i] != '\r' && s[i] != '\b' &&
-        s[i] != '\t')
+    if (i < n && s[i] != '\n' && s[i] != '\r' && s[i] != '\b' && s[i] != '\t')
       continue;
     if (append_to_current_line(t, s + start, i - start) < 0)
       return;
@@ -185,8 +183,7 @@ static void draw(App *a) {
   size_t max_first = total > (size_t)visible ? total - (size_t)visible : 0;
   size_t first = max_first > t->scroll ? max_first - t->scroll : 0;
   int y = top;
-  for (size_t row = first; row < total && y < height - 5;
-       row++, y += lineh) {
+  for (size_t row = first; row < total && y < height - 5; row++, y += lineh) {
     const char *line = row < t->line_count ? t->lines[row] : "";
     int line_x = 12;
     if (line[0]) {
@@ -239,7 +236,7 @@ static int write_command(int fd, const char *s, size_t n) {
   return 0;
 }
 static void submit(App *a, Tab *t) {
-  /* Save the visible command, then send a complete line to this tab's worker. */
+  /* Save the command in scrollback, then send it to this tab's worker. */
   if (t->multiline_len + t->input_len + 2 >= TERM_LINE_MAX) {
     add_text(t, "terminator: input too long\n", 27);
     t->multiline_len = 0;

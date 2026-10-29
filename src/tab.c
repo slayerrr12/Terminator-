@@ -15,11 +15,6 @@
  * mode, the worker uses the other ends in the same process; in process mode,
  * the worker child owns them. Keep these descriptors local to the tab.
  */
-static int make_pipe(int p[2]) {
-  if (pipe(p) < 0)
-    return -1;
-  return 0;
-}
 static void close_on_exec(int fd) {
   int flags = fcntl(fd, F_GETFD);
   if (flags >= 0)
@@ -50,17 +45,17 @@ int app_add_tab(App *app) {
   }
   atomic_init(&t->foreground->pgid, 0);
   int in[2], out[2], st[2];
-  if (make_pipe(in) < 0) {
+  if (pipe(in) < 0) {
     munmap(t->foreground, sizeof(*t->foreground));
     return -1;
   }
-  if (make_pipe(out) < 0) {
+  if (pipe(out) < 0) {
     close(in[0]);
     close(in[1]);
     munmap(t->foreground, sizeof(*t->foreground));
     return -1;
   }
-  if (make_pipe(st) < 0) {
+  if (pipe(st) < 0) {
     close(in[0]);
     close(in[1]);
     close(out[0]);

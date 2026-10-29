@@ -478,10 +478,10 @@ int shell_execute(ShellContext *ctx, Pipeline *pipeline, int output_fd) {
     /* Stateful built-ins must run here so cd and job changes persist. */
     int parent_builtin = !pipeline->background &&
                          (!strcmp(name, "cd") || !strcmp(name, "exit") ||
-                          !strcmp(name, "clear") ||
-                          !strcmp(name, "history") || !strcmp(name, "source") ||
-                          !strcmp(name, "jobs") || !strcmp(name, "fg") ||
-                          !strcmp(name, "bg") || !strcmp(name, "multiWatch"));
+                          !strcmp(name, "clear") || !strcmp(name, "history") ||
+                          !strcmp(name, "source") || !strcmp(name, "jobs") ||
+                          !strcmp(name, "fg") || !strcmp(name, "bg") ||
+                          !strcmp(name, "multiWatch"));
     if (parent_builtin) {
       int target = output_fd, opened = -1;
       if (command->input_path) {
