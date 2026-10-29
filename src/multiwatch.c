@@ -147,6 +147,8 @@ static int run_watch_supervisor(WatchCommand *commands, size_t count,
 
 int shell_builtin_multiwatch(ShellContext *shell, char **arguments,
                              int output_fd) {
+  /* The input is capped below, so a fixed array avoids extra allocation. */
+  WatchCommand commands[TERM_MAX_JOBS] = {0};
   size_t count = 0;
   for (size_t i = 1; arguments[i]; ++i) {
     char *argument = arguments[i];
@@ -156,42 +158,28 @@ int shell_builtin_multiwatch(ShellContext *shell, char **arguments,
     while (length &&
            (argument[length - 1] == ',' || argument[length - 1] == ']'))
       argument[--length] = '\0';
-    if (length)
-      ++count;
+    if (!length)
+      continue;
+    if (count == TERM_MAX_JOBS) {
+      dprintf(output_fd, "terminator: multiWatch: expected 1-%d commands\n",
+              TERM_MAX_JOBS);
+      return 2;
+    }
+    commands[count++].command = argument;
   }
-  if (!count || count > TERM_MAX_JOBS) {
+  if (!count) {
     dprintf(output_fd, "terminator: multiWatch: expected 1-%d commands\n",
             TERM_MAX_JOBS);
     return 2;
   }
-  WatchCommand *commands = calloc(count, sizeof(*commands));
-  if (!commands)
-    return 1;
-  size_t index = 0;
-  for (size_t i = 1; arguments[i]; ++i) {
-    char *argument = arguments[i];
-    if (*argument == '[')
-      ++argument;
-    size_t length = strlen(argument);
-    while (length &&
-           (argument[length - 1] == ',' || argument[length - 1] == ']'))
-      argument[--length] = '\0';
-    if (length)
-      commands[index++].command = argument;
-  }
   /* A background invocation already runs in its tracked job process group. */
-  if (shell->process_group > 0) {
-    int result = run_watch_supervisor(commands, count, shell, output_fd);
-    free(commands);
-    return result;
-  }
+  if (shell->process_group > 0)
+    return run_watch_supervisor(commands, count, shell, output_fd);
   pid_t supervisor = fork();
   if (supervisor == 0) {
     int result = run_watch_supervisor(commands, count, shell, output_fd);
-    free(commands);
     _exit(result);
   }
-  free(commands);
   if (supervisor < 0) {
     dprintf(output_fd, "terminator: multiWatch: %s\n", strerror(errno));
     return 1;

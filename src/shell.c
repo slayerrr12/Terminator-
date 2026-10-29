@@ -18,8 +18,8 @@ static char *join_path(const char *directory, const char *name) {
   return path;
 }
 
-static char *make_path_from_working_directory(const char *working_directory,
-                                              const char *path) {
+char *shell_path_from_working_directory(const char *working_directory,
+                                        const char *path) {
   if (path[0] == '/')
     return strdup(path);
   return join_path(working_directory, path);
@@ -60,7 +60,7 @@ static int builtin_cd(ShellContext *shell, char **arguments, int output_fd) {
   }
 
   char *candidate =
-      make_path_from_working_directory(shell->working_directory, destination);
+      shell_path_from_working_directory(shell->working_directory, destination);
   char resolved[PATH_MAX];
   if (!candidate || resolve_directory(candidate, resolved) < 0) {
     int error_number = errno ? errno : ENOMEM;
@@ -118,7 +118,7 @@ static int builtin_source(ShellContext *shell, char **arguments,
     return 2;
   }
   char *path =
-      make_path_from_working_directory(shell->working_directory, arguments[1]);
+      shell_path_from_working_directory(shell->working_directory, arguments[1]);
   FILE *file = path ? fopen(path, "r") : NULL;
   if (!file) {
     dprintf(output_fd, "terminator: source: %s: %s\n", arguments[1],

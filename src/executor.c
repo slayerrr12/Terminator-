@@ -67,23 +67,6 @@ static int append_argument(char ***args, size_t *count, char *value) {
   return 0;
 }
 
-static char *join_path(const char *directory, const char *path) {
-  size_t path_size = strlen(directory) + strlen(path) + 2;
-  char *joined_path = malloc(path_size);
-  if (!joined_path)
-    return NULL;
-
-  snprintf(joined_path, path_size, "%s/%s", directory, path);
-  return joined_path;
-}
-
-static char *build_path_from_working_directory(const char *working_directory,
-                                               const char *path) {
-  if (path[0] == '/')
-    return strdup(path);
-  return join_path(working_directory, path);
-}
-
 static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
                                     int fd) {
   /* Expand each argument and glob eligible words before execvp(). */
@@ -103,10 +86,10 @@ static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
       if (word[0] == '/')
         pattern = strdup(word);
       else {
-        working_directory_prefix =
-            build_path_from_working_directory(shell->working_directory, "");
-        pattern =
-            build_path_from_working_directory(shell->working_directory, word);
+        working_directory_prefix = shell_path_from_working_directory(
+            shell->working_directory, "");
+        pattern = shell_path_from_working_directory(shell->working_directory,
+                                                    word);
       }
       if (!pattern || (word[0] != '/' && !working_directory_prefix)) {
         free(pattern);
@@ -513,8 +496,8 @@ int shell_execute(ShellContext *shell, Pipeline *pipeline, int output_fd) {
     if (parent_builtin) {
       int target = output_fd, opened = -1;
       if (command->input_path) {
-        char *path = build_path_from_working_directory(shell->working_directory,
-                                                       command->input_path);
+        char *path = shell_path_from_working_directory(
+            shell->working_directory, command->input_path);
         int fd = path ? redirection_open_input(path, output_fd) : -1;
         free(path);
         if (fd < 0) {
@@ -524,8 +507,8 @@ int shell_execute(ShellContext *shell, Pipeline *pipeline, int output_fd) {
         close(fd);
       }
       if (command->output_path) {
-        char *path = build_path_from_working_directory(shell->working_directory,
-                                                       command->output_path);
+        char *path = shell_path_from_working_directory(
+            shell->working_directory, command->output_path);
         opened = path
                      ? redirection_open_output(path, command->append, output_fd)
                      : -1;

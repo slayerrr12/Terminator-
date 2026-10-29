@@ -55,6 +55,9 @@ int shell_parse(const char *text, Tokens *tokens, Pipeline *pipeline,
                 char **error);
 void shell_tokens_free(Tokens *tokens);
 void shell_pipeline_free(Pipeline *pipeline);
+/* Build an absolute path from this tab's logical current directory. */
+char *shell_path_from_working_directory(const char *working_directory,
+                                        const char *path);
 int shell_execute(ShellContext *shell, Pipeline *pipeline, int output_fd);
 int shell_run_line(ShellContext *shell, const char *line, int output_fd);
 int shell_expand_word(ShellContext *shell, const char *input_text,
