@@ -71,7 +71,10 @@ GUI.
 Each pipeline shares a process group. The worker waits for foreground jobs and
 records background jobs in its own fixed-size table. `jobs` checks job states,
 `fg` resumes and waits for one job, and `bg` resumes it without waiting. The
-GUI sends Ctrl+C and Ctrl+Z to the selected tab's foreground process group.
+GUI sends Ctrl+C and Ctrl+Z to the selected tab's foreground process group, so
+the signals reach the command rather than the GUI or shell worker. During
+shutdown, stopped jobs are resumed before SIGTERM is sent so the worker can
+reap them and finish closing the tab.
 
 ## `multiWatch`
 

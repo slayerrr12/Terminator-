@@ -365,8 +365,9 @@ background jobs in the tab's `ShellContext`. `jobs`, `fg`, and `bg` inspect,
 resume, or wait for those jobs. `src/gui.c` sends Ctrl+C and Ctrl+Z to the
 active tab's foreground process group.
 
-This is basic process-group job control. Without a PTY, Terminator cannot
-provide the full foreground-terminal behavior of a normal Linux terminal.
+This implements the signal and job actions listed in Task 8. Without a PTY,
+Terminator cannot provide the full foreground-terminal behavior of a normal
+Linux terminal.
 
 ## Task 9: searchable persistent history
 

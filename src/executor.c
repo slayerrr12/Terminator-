@@ -473,6 +473,8 @@ void shell_jobs_cleanup(ShellContext *shell) {
     ShellJob *job = &shell->jobs[i];
     if (job->state == JOB_UNUSED || job->state == JOB_DONE)
       continue;
+    /* Resume stopped jobs so they can receive SIGTERM and be reaped. */
+    (void)kill(-job->pgid, SIGCONT);
     (void)kill(-job->pgid, SIGTERM);
     while (waitpid(-job->pgid, NULL, 0) > 0 || errno == EINTR) {
     }

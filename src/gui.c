@@ -10,6 +10,7 @@
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -31,6 +32,37 @@ static void clear_scrollback(Tab *tab) {
 /* Pipe reads can split text at any byte; the scrollback joins each chunk. */
 static void append_output_text(Tab *tab, const char *text, size_t length) {
   (void)scrollback_append_text(&tab->scrollback, text, length);
+}
+
+/* Send Ctrl+C or Ctrl+Z to the job, never to the GUI process. */
+static void signal_foreground_job(Tab *tab, int signal_number,
+                                  const char *visible_text) {
+  if (!tab->foreground)
+    return;
+
+  int process_group = atomic_load(&tab->foreground->pgid);
+  if (process_group <= 0)
+    return;
+
+  if (kill(-process_group, signal_number) < 0) {
+    if (errno == ESRCH)
+      return;
+
+    int error_number = errno;
+    char message[256];
+    int length = snprintf(message, sizeof(message),
+                          "terminator: signal failed: %s\n",
+                          strerror(error_number));
+    if (length > 0) {
+      size_t text_length = (size_t)length;
+      if (text_length >= sizeof(message))
+        text_length = sizeof(message) - 1;
+      append_output_text(tab, message, text_length);
+    }
+    return;
+  }
+
+  append_output_text(tab, visible_text, strlen(visible_text));
 }
 
 static void build_shell_prompt(const Tab *tab, char *prompt, size_t size) {
@@ -296,19 +328,11 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
     return;
   }
   if (ctrl && !shift && hotkey_symbol == XK_c) {
-    int pgid = atomic_load(&tab->foreground->pgid);
-    if (pgid > 0) {
-      (void)kill(-pgid, SIGINT);
-      append_output_text(tab, "^C\n", 3);
-    }
+    signal_foreground_job(tab, SIGINT, "^C\n");
     return;
   }
   if (ctrl && !shift && hotkey_symbol == XK_z) {
-    int pgid = atomic_load(&tab->foreground->pgid);
-    if (pgid > 0) {
-      (void)kill(-pgid, SIGTSTP);
-      append_output_text(tab, "^Z\n", 3);
-    }
+    signal_foreground_job(tab, SIGTSTP, "^Z\n");
     return;
   }
   if (ctrl && !shift && hotkey_symbol == XK_d) {

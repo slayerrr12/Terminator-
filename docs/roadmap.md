@@ -14,7 +14,7 @@ for a finished later task.
 | Task 5: pipes | Implemented | Pipelines can have multiple stages and can be combined with redirection. |
 | Task 6: `multiWatch` | Implemented | Commands run concurrently; `poll()` collects their output and completed commands restart after about two seconds. |
 | Task 7: configurable hotkeys | Partial | Assigned editing keys, clear, tab, interrupt, stop, history navigation, text selection, and X11 copy/paste work. User-configurable persistent bindings are not implemented. |
-| Task 8: signals and job control | Basic support implemented | Background jobs, `jobs`, `fg`, `bg`, Ctrl+C, and Ctrl+Z work with process groups. Full interactive terminal control requires a PTY and is not implemented. |
+| Task 8: signals and job control | Implemented for the assignment requirements | Ctrl+C and Ctrl+Z signal the active job process group; `cmd &`, `jobs`, `fg`, and `bg` are supported. PTY-based terminal control is not implemented. |
 | Task 9: searchable persistent history | Partial | Tabs share a synchronized in-memory ring of up to 1,024 commands; Up/Down browse it. The history file, 10,000-entry limit, and Ctrl+R search are not implemented. |
 | Task 10: file-name completion | Not implemented | Tab does not scan the current directory to complete file names. |
 | Task 11: Bash-subset script interpreter | Not implemented | `source` executes complete lines through the current shell parser; it does not interpret assignments, positional parameters, or conditional blocks itself. |

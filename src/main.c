@@ -5,7 +5,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
-/* Signal handlers set this flag; the GUI loop performs orderly shutdown. */
+/* SIGTERM and SIGHUP request cleanup; the GUI loop performs it safely. */
 volatile sig_atomic_t terminator_stopping = 0;
 static void stop_handler(int signal_number) {
   (void)signal_number;
