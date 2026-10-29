@@ -23,6 +23,7 @@ src/
   multiwatch.c       Concurrent command supervisor for multiWatch
   history.c          Shared in-memory command history
   scrollback.c       Bounded per-tab output history and scrolling behavior
+  selection.c        Text selection and X11 clipboard handling
 docs/                This guide, design notes, architecture, and roadmap
 Makefile             Build, run, and clean commands
 README.md            Dependencies, build instructions, features, and limits
@@ -127,6 +128,8 @@ the same descriptors.
 
 - `src/gui.c`: `gui_run`, `handle_key_press`, `draw_terminal_window`,
   `submit_input`, and `append_output_text`.
+- `src/selection.c`: mouse selection, selection rendering, and X11 clipboard
+  requests and replies.
 - `src/scrollback.c`: line storage, the 10,000-line and 1 MiB per-tab limits,
   viewport position, and follow-output behavior.
 - `src/tab.c`: `app_add_tab` and `app_close_tab`.
@@ -350,11 +353,10 @@ Ctrl+L clears the active tab's output, while Ctrl+D closes an empty tab.
 Up/Down browse the shared command history; Page Up/Page Down and the mouse
 wheel scroll output.
 
-Dragging over output selects text. Ctrl+Shift+C places the selection on the
-X11 clipboard, and Ctrl+Shift+V inserts clipboard text into the input line.
-`reply_to_selection_request()` and `receive_paste()` handle the X11 clipboard
-exchange. The bindings are fixed in the code; user-configurable saved bindings
-are not implemented.
+Dragging over output selects text. `src/selection.c` owns selection drawing,
+mouse tracking, and X11 clipboard exchange. Ctrl+Shift+C copies selected text;
+Ctrl+Shift+V inserts clipboard text into the input line. The bindings are fixed
+in the code; user-configurable saved bindings are not implemented.
 
 ## Task 8: signals and job control
 

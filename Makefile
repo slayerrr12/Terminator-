@@ -9,7 +9,7 @@ LIBRARIES = -lX11 -pthread
 # All source files that make up the terminal application.
 SOURCES = src/main.c src/gui.c src/tab.c src/parser.c \
 	src/executor.c src/shell.c src/multiwatch.c src/history.c \
-	src/scrollback.c
+	src/scrollback.c src/selection.c
 
 # Running "make" builds the application.
 .PHONY: all run clean
@@ -17,7 +17,7 @@ all: terminator
 
 # Compile and link every source file into one executable.
 terminator: $(SOURCES) include/terminator.h include/shell.h \
-	include/scrollback.h
+	include/scrollback.h include/selection.h
 	$(CC) $(CFLAGS) $(SOURCES) -o terminator $(LIBRARIES)
 
 # Build the application if needed, then start it.

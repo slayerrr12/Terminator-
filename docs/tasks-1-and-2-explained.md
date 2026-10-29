@@ -37,11 +37,13 @@ process. In either mode, external commands run in child processes.
 | --- | --- |
 | [`src/main.c`](../src/main.c) | Chooses thread or process mode, initializes shared history, creates the first tab, and starts the GUI. |
 | [`src/gui.c`](../src/gui.c) | Creates the X11 window, edits the active tab's input, sends completed commands, draws output, and watches all tabs for output. |
+| [`src/selection.c`](../src/selection.c) | Tracks mouse text selection and exchanges selected or pasted text through X11 clipboard selections. |
 | [`src/tab.c`](../src/tab.c) | Creates each tab's pipes and starts, closes, or joins/reaps its worker. |
 | [`src/shell.c`](../src/shell.c) | Runs the worker's input loop and implements built-in commands. |
 | [`src/parser.c`](../src/parser.c) | Turns a command line into tokens and parsed command/pipeline structures. |
 | [`src/executor.c`](../src/executor.c) | Runs built-ins or forks child processes, connects pipelines and redirections, calls `execvp()`, and waits for jobs. |
 | [`include/terminator.h`](../include/terminator.h) | Defines `App`, `Tab`, and the pipe and history state shared by the GUI and workers. |
+| [`include/selection.h`](../include/selection.h) | Declares the small interface between the GUI and text-selection code. |
 | [`include/shell.h`](../include/shell.h) | Defines `ShellContext`, parsed commands, pipelines, and per-tab jobs. |
 
 ## Thread mode and process mode

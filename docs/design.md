@@ -8,6 +8,8 @@ beginner-oriented walkthrough of each task, see
 
 `gui.c` owns the X11 display, window, keyboard input, drawing, and event loop.
 It keeps an editable input buffer and a scrollback buffer for each tab.
+`selection.c` handles mouse text selection and X11 clipboard copy and paste so
+those details stay out of the window event loop.
 `scrollback.c` stores up to 10,000 lines and 1 MiB of allocated line text per
 tab in a ring, so old output is evicted without moving every remaining line.
 For a line larger than that byte budget, it keeps the tail. Each tab tracks

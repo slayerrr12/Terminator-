@@ -8,9 +8,11 @@ include/
   terminator.h   Application, tab, history, and worker data structures
   shell.h        Parser, command, shell-state, and job structures
   scrollback.h   Per-tab scrollback buffer and scrolling interface
+  selection.h    Text selection and clipboard interface
 src/
   main.c         Startup, mode selection, shared history, and shutdown
   gui.c          X11 window, keyboard input, drawing, and event loop
+  selection.c    Mouse text selection and X11 clipboard handling
   tab.c          Per-tab pipes and worker thread/process lifecycle
   shell.c        Shell worker, built-ins, and command-file execution
   parser.c       Input completeness, tokenizing, parsing, and expansion
@@ -46,6 +48,8 @@ flowchart LR
 
 The GUI polls the X11 connection and every tab's output and status pipes. It
 sleeps while there is no input or output to process. Only the GUI calls Xlib.
+Mouse selection and clipboard messages are handled in `selection.c` by the
+same GUI thread.
 Each tab owns its own scrollback ring, limited to 10,000 lines and 1 MiB of
 allocated line text. The GUI draws the active tab's visible slice and tracks
 its first visible line while output continues. For a line larger than the
