@@ -18,7 +18,6 @@ src/
   multiwatch.c   Concurrent command supervisor for multiWatch
   history.c      Shared in-memory command history
   scrollback.c   Bounded per-tab output history and viewport tracking
-tests/           Worker, scrollback, and X11 interaction checks
 docs/            Task guide, architecture, design, and roadmap
 ```
 

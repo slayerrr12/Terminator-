@@ -83,18 +83,3 @@ custom Bash-subset script interpreter are not implemented. `source` executes
 complete input lines using Terminator's existing shell parser; it does not
 provide the custom interpreter described in the larger assignment. See
 [docs/roadmap.md](docs/roadmap.md) for task status and remaining work.
-
-## Checks
-
-The repository includes worker and X11 interaction checks. Run them with:
-
-```sh
-make test
-```
-
-The GUI interaction check uses Xvfb. Install it on Debian or Ubuntu if it is
-not already available:
-
-```sh
-sudo apt install xvfb
-```

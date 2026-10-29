@@ -23,9 +23,8 @@ src/
   multiwatch.c       Concurrent command supervisor for multiWatch
   history.c          Shared in-memory command history
   scrollback.c       Bounded per-tab output history and scrolling behavior
-tests/               Worker, scrollback, and X11 interaction checks
 docs/                This guide, design notes, architecture, and roadmap
-Makefile             Build, run, clean, and test commands
+Makefile             Build, run, and clean commands
 README.md            Dependencies, build instructions, features, and limits
 ```
 
