@@ -30,6 +30,20 @@ mode, pass the assignment's launch option:
 The Makefile also provides `make run` to build the program if needed and start
 it. `make clean` removes the executable and generated build files.
 
+## Automated tests
+
+Run all automated checks with one command:
+
+```sh
+make test
+```
+
+The suite also has focused targets: `make test-unit`, `make test-integration`,
+`make test-regression`, and `make test-gui`. Each case reports its expected and
+observed result, and any failure makes the target return nonzero. Use
+`make test-clean` to remove the generated test runner. See
+[tests/README.md](tests/README.md) for the coverage map and known test limits.
+
 ## Using the window
 
 - Press **Ctrl+T** or click **[+]** to open a tab.
