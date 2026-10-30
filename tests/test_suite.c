@@ -806,15 +806,16 @@ static int worker_command(TestWorker *worker, const char *command,
 }
 
 static int worker_wait_output(TestWorker *worker, const char *first,
-                              const char *second, char *capture,
-                              size_t capacity, size_t minimum_occurrences,
-                              int timeout_ms) {
+                              const char *second, const char *third,
+                              char *capture, size_t capacity,
+                              size_t minimum_occurrences, int timeout_ms) {
   size_t length = 0;
   capture[0] = '\0';
   int elapsed = 0;
   while (elapsed < timeout_ms) {
     if (count_occurrences(capture, first) >= minimum_occurrences &&
-        (!second || count_occurrences(capture, second) >= minimum_occurrences))
+        (!second || count_occurrences(capture, second) >= minimum_occurrences) &&
+        (!third || count_occurrences(capture, third) >= minimum_occurrences))
       return 0;
     struct pollfd descriptor = {worker->output_read, POLLIN | POLLHUP, 0};
     int ready = poll(&descriptor, 1, 100);
@@ -828,7 +829,9 @@ static int worker_wait_output(TestWorker *worker, const char *first,
   }
   return count_occurrences(capture, first) >= minimum_occurrences &&
                  (!second ||
-                  count_occurrences(capture, second) >= minimum_occurrences)
+                  count_occurrences(capture, second) >= minimum_occurrences) &&
+                 (!third ||
+                  count_occurrences(capture, third) >= minimum_occurrences)
              ? 0
              : -1;
 }
@@ -1415,16 +1418,18 @@ static void test_multiwatch(void) {
     char first_run[8192];
     WorkerStatus status;
     worker_send(&worker,
-                "multiWatch [\"/usr/bin/printf left\", \"/usr/bin/printf right\"]");
-    int outputs_ok = worker_wait_output(&worker, "left", "right", first_run,
-                                        sizeof(first_run), 2, 4000) == 0;
+                "multiWatch [\"/usr/bin/printf left\",\"/usr/bin/printf right\",\"/usr/bin/printf third\"]");
+    int outputs_ok = worker_wait_output(&worker, "left", "right", "third",
+                                        first_run, sizeof(first_run), 2,
+                                        4000) == 0;
     int group = wait_for_foreground(foreground, 3000);
     int signalled = group > 0 && kill(-group, SIGINT) == 0;
     int completed = signalled && worker_collect(&worker, output, sizeof(output),
                                                  &status, 4000) == 0;
     int interrupt_ok = completed && status.status == 128 + SIGINT;
     int format_ok = outputs_ok && count_occurrences(first_run, "left") >= 2 &&
-                    count_occurrences(first_run, "right") >= 2;
+                    count_occurrences(first_run, "right") >= 2 &&
+                    count_occurrences(first_run, "third") >= 2;
     report_test(use_thread ? "M102" : "M002", "multiWatch",
                 "parallel commands print separated output", mode,
                 "each command header is followed by its output", first_run,
@@ -1457,12 +1462,12 @@ static void test_multiwatch_spacing_regression(void) {
   int result = shell_parse(command, &tokens, &pipeline, &error);
   int one_argument = result == 0 && pipeline.count == 1 &&
                      pipeline.commands[0].argument_count == 2;
-  report_test("R001", "multiWatch syntax", "comma-separated items without spaces",
-              command, "three commands remain separate watch items",
-              one_argument ? "list is one shell argument after command"
-                           : "different tokenization",
-              !one_argument,
-              "This reproduces the compact list format shown in the user screenshot.");
+  report_test("R001", "multiWatch syntax", "compact comma-separated list",
+              command, "the bracketed list reaches the builtin as one argument",
+              one_argument ? "bracketed list preserved"
+                           : "list was split unexpectedly",
+              one_argument,
+              "The builtin splits its contents into three watched commands.");
   free(error);
   shell_tokens_free(&tokens);
   shell_pipeline_free(&pipeline);

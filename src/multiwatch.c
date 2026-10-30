@@ -1,4 +1,5 @@
 #include "shell.h"
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -14,12 +15,60 @@
  * Runs a set of shell commands concurrently, captures each output stream, and
  * restarts finished commands on the watch interval.
  */
+
 typedef struct {
   const char *command;
   pid_t pid;
   int output_fd;
   time_t restart_at;
 } WatchCommand;
+
+/* Split a bracketed list argument such as ["pwd","whoami","ls"].
+ * The shell lexer keeps the whole compact list in one argument, so commas
+ * must be handled here. Spaces inside each command are preserved. */
+static int add_watch_items(WatchCommand *commands, size_t *count, char *argument,
+                           int output_fd) {
+  char *item_start = argument;
+  char quote = 0;
+
+  if (*item_start == '[')
+    item_start++;
+
+  for (char *position = item_start;; position++) {
+    char character = *position;
+    if ((character == '\'' || character == '"') &&
+        (!quote || quote == character)) {
+      quote = quote ? 0 : character;
+      continue;
+    }
+
+    if ((!character || (character == ',' && !quote)) && !quote) {
+      char *item_end = position;
+      while (item_start < item_end && isspace((unsigned char)*item_start))
+        item_start++;
+      while (item_end > item_start && isspace((unsigned char)item_end[-1]))
+        item_end--;
+      if (item_end > item_start && item_end[-1] == ']')
+        item_end--;
+      while (item_end > item_start && isspace((unsigned char)item_end[-1]))
+        item_end--;
+      if (item_end > item_start) {
+        if (*count == TERM_MAX_JOBS) {
+          dprintf(output_fd,
+                  "terminator: multiWatch: expected 1-%d commands\n",
+                  TERM_MAX_JOBS);
+          return -1;
+        }
+        *item_end = '\0';
+        commands[(*count)++].command = item_start;
+      }
+      if (!character)
+        break;
+      item_start = position + 1;
+    }
+  }
+  return 0;
+}
 
 /* Start one command and give the supervisor a nonblocking output pipe. */
 static int start_watched_command(WatchCommand *watch, ShellContext *shell,
@@ -151,21 +200,8 @@ int shell_builtin_multiwatch(ShellContext *shell, char **arguments,
   WatchCommand commands[TERM_MAX_JOBS] = {0};
   size_t count = 0;
   for (size_t i = 1; arguments[i]; ++i) {
-    char *argument = arguments[i];
-    if (*argument == '[')
-      ++argument;
-    size_t length = strlen(argument);
-    while (length &&
-           (argument[length - 1] == ',' || argument[length - 1] == ']'))
-      argument[--length] = '\0';
-    if (!length)
-      continue;
-    if (count == TERM_MAX_JOBS) {
-      dprintf(output_fd, "terminator: multiWatch: expected 1-%d commands\n",
-              TERM_MAX_JOBS);
+    if (add_watch_items(commands, &count, arguments[i], output_fd) < 0)
       return 2;
-    }
-    commands[count++].command = argument;
   }
   if (!count) {
     dprintf(output_fd, "terminator: multiWatch: expected 1-%d commands\n",
