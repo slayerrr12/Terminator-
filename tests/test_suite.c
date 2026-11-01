@@ -3,6 +3,7 @@
 #include "scrollback.h"
 #include "shell.h"
 #include "terminator.h"
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <X11/Xutil.h>
@@ -29,13 +30,203 @@ static int failed_tests;
 static int skipped_tests;
 static char failed_test_ids[512][32];
 static size_t failed_test_count;
+typedef struct {
+  char *id;
+  char *task;
+  char *feature;
+  char *scenario;
+  char *input;
+  char *expected;
+  char *actual;
+  char *notes;
+  int passed;
+  int skipped;
+} TestRecord;
+static TestRecord *test_records;
+static size_t test_record_count;
+static size_t test_record_capacity;
+static int test_record_error;
 static char temporary_root[] = "build/tests/tmp-XXXXXX";
 static char *test_root;
 static char shell_directory[TERM_PATH_BUFFER];
 static unsigned int history_test_number;
+static void wait_milliseconds(long milliseconds);
+static int gui_find_text_line(Display *display, Window window,
+                              const char *expected_text, int after_baseline);
 static int join_test_path(char *destination, size_t capacity,
                           const char *directory, const char *name);
 static int write_all(int fd, const char *text, size_t length);
+static SharedHistory *new_worker_history(int use_thread);
+static SharedForeground *new_foreground(void);
+typedef struct TestWorker TestWorker;
+static void worker_stop(TestWorker *worker);
+
+static const char *task_for_feature(const char *feature) {
+  if (strstr(feature, "Tasks 4 and 5"))
+    return "Tasks 4 and 5";
+  if (strstr(feature, "Task 11")) return "Task 11";
+  if (strstr(feature, "Task 10")) return "Task 10";
+  if (strstr(feature, "Task 9")) return "Task 9";
+  if (strstr(feature, "Task 8")) return "Task 8";
+  if (strstr(feature, "Task 7")) return "Task 7";
+  if (strstr(feature, "Task 6")) return "Task 6";
+  if (strstr(feature, "Task 5")) return "Task 5";
+  if (strstr(feature, "Task 4")) return "Task 4";
+  if (strstr(feature, "Task 3")) return "Task 3";
+  if (strstr(feature, "Task 2")) return "Task 2";
+  if (strstr(feature, "Task 1")) return "Task 1";
+  if (strstr(feature, "history"))
+    return "Task 9";
+  if (strstr(feature, "completion"))
+    return "Task 10";
+  if (strstr(feature, "multiWatch"))
+    return "Task 6";
+  if (strstr(feature, "hotkey") || strstr(feature, "clipboard"))
+    return "Task 7";
+  if (strstr(feature, "signal") || strstr(feature, "job control") ||
+      strstr(feature, "fg/bg") || strstr(feature, "jobs") ||
+      strstr(feature, "worker recovery"))
+    return "Task 8";
+  if (strstr(feature, "GUI") || strstr(feature, "worker") ||
+      strstr(feature, "execution modes") || strstr(feature, "scrollback"))
+    return "Task 1";
+  if (strstr(feature, "parser") || strstr(feature, "multiline") ||
+      strstr(feature, "substitution") || strstr(feature, "quoting"))
+    return "Task 3";
+  if (strstr(feature, "redirection"))
+    return strstr(feature, "pipeline") ? "Tasks 4 and 5" : "Task 4";
+  if (strstr(feature, "pipeline"))
+    return "Task 5";
+  return "Task 2";
+}
+
+/* Worker and GUI case IDs distinguish their execution mode. */
+static const char *mode_for_test_id(const char *id) {
+  if (!id || !id[0] || !id[1])
+    return "shared";
+  int number = atoi(id + 1);
+  if (id[0] == 'W' || id[0] == 'J')
+    return number >= 100 ? "process" : "thread";
+  if (id[0] == 'M')
+    return number >= 100 ? "thread" : "process";
+  if (id[0] == 'G') {
+    if (number == 2 || number >= 100)
+      return "process";
+    return "thread";
+  }
+  return "shared";
+}
+
+static char *copy_or_empty(const char *text) {
+  return strdup(text ? text : "");
+}
+
+static void save_test_record(const char *id, const char *task,
+                             const char *feature, const char *scenario,
+                             const char *input, const char *expected,
+                             const char *actual, const char *notes,
+                             int passed, int skipped) {
+  if (test_record_count == test_record_capacity) {
+    size_t capacity = test_record_capacity ? test_record_capacity * 2 : 128;
+    TestRecord *records = realloc(test_records, capacity * sizeof(*records));
+    if (!records) {
+      test_record_error = 1;
+      return;
+    }
+    test_records = records;
+    test_record_capacity = capacity;
+  }
+  TestRecord record = {0};
+  record.id = copy_or_empty(id);
+  record.task = copy_or_empty(task);
+  record.feature = copy_or_empty(feature);
+  record.scenario = copy_or_empty(scenario);
+  record.input = copy_or_empty(input);
+  record.expected = copy_or_empty(expected);
+  record.actual = copy_or_empty(actual);
+  record.notes = copy_or_empty(notes);
+  record.passed = passed;
+  record.skipped = skipped;
+  if (!record.id || !record.task || !record.feature || !record.scenario ||
+      !record.input || !record.expected || !record.actual || !record.notes) {
+    free(record.id);
+    free(record.task);
+    free(record.feature);
+    free(record.scenario);
+    free(record.input);
+    free(record.expected);
+    free(record.actual);
+    free(record.notes);
+    test_record_error = 1;
+    return;
+  }
+  test_records[test_record_count++] = record;
+}
+
+static void write_xml_text(FILE *file, const char *text) {
+  for (; text && *text; text++) {
+    switch (*text) {
+    case '&': fputs("&amp;", file); break;
+    case '<': fputs("&lt;", file); break;
+    case '>': fputs("&gt;", file); break;
+    case '\"': fputs("&quot;", file); break;
+    case '\'': fputs("&apos;", file); break;
+    default: fputc(*text, file); break;
+    }
+  }
+}
+
+static int write_junit_report(const char *path) {
+  if (!path || !*path)
+    return 0;
+  FILE *file = fopen(path, "w");
+  if (!file)
+    return -1;
+  fprintf(file,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+          "<testsuite name=\"Terminator\" tests=\"%d\" failures=\"%d\" "
+          "skipped=\"%d\">\n",
+          total_tests, failed_tests, skipped_tests);
+  for (size_t i = 0; i < test_record_count; i++) {
+    TestRecord *record = &test_records[i];
+    fputs("  <testcase classname=\"Terminator.Tests\" name=\"", file);
+    write_xml_text(file, record->id);
+    fputs(" - ", file);
+    write_xml_text(file, record->scenario);
+    fputs("\">\n", file);
+    fputs("    <properties><property name=\"task\" value=\"", file);
+    write_xml_text(file, record->task);
+    fputs("\"/><property name=\"mode\" value=\"", file);
+    write_xml_text(file, mode_for_test_id(record->id));
+    fputs("\"/><property name=\"feature\" value=\"", file);
+    write_xml_text(file, record->feature);
+    fputs("\"/></properties>\n", file);
+    if (record->skipped) {
+      fputs("    <skipped message=\"", file);
+      write_xml_text(file, record->notes);
+      fputs("\"/>\n", file);
+    } else if (!record->passed) {
+      fputs("    <failure message=\"", file);
+      write_xml_text(file, record->actual);
+      fputs("\">", file);
+      write_xml_text(file, record->notes);
+      fputs("</failure>\n", file);
+    }
+    fputs("    <system-out>Input: ", file);
+    write_xml_text(file, record->input);
+    fputs("; Expected: ", file);
+    write_xml_text(file, record->expected);
+    fputs("; Actual: ", file);
+    write_xml_text(file, record->actual);
+    fputs("; Notes: ", file);
+    write_xml_text(file, record->notes);
+    fputs("</system-out>\n  </testcase>\n", file);
+  }
+  int failed = fputs("</testsuite>\n", file) == EOF;
+  if (fclose(file) != 0)
+    failed = 1;
+  return failed ? -1 : test_record_error ? -1 : 0;
+}
 
 static int set_test_history_path(const char *name) {
   char path[TERM_PATH_BUFFER];
@@ -66,6 +257,8 @@ static void report_test(const char *id, const char *feature,
                         const char *expected, const char *actual, int passed,
                         const char *notes) {
   total_tests++;
+  save_test_record(id, task_for_feature(feature), feature, scenario, input,
+                   expected, actual, notes, passed, 0);
   if (passed)
     passed_tests++;
   else {
@@ -75,6 +268,10 @@ static void report_test(const char *id, const char *feature,
                sizeof(failed_test_ids[0]), "%s", id);
   }
   print_field(id);
+  fputs(" | Task: ", stdout);
+  print_field(task_for_feature(feature));
+  fputs(" | Mode: ", stdout);
+  print_field(mode_for_test_id(id));
   fputs(" | Feature: ", stdout);
   print_field(feature);
   fputs(" | Scenario: ", stdout);
@@ -95,7 +292,13 @@ static void report_skip(const char *id, const char *feature,
                         const char *scenario, const char *reason) {
   total_tests++;
   skipped_tests++;
+  save_test_record(id, task_for_feature(feature), feature, scenario, "n/a",
+                   "run", "skipped", reason, 0, 1);
   print_field(id);
+  fputs(" | Task: ", stdout);
+  print_field(task_for_feature(feature));
+  fputs(" | Mode: ", stdout);
+  print_field(mode_for_test_id(id));
   fputs(" | Feature: ", stdout);
   print_field(feature);
   fputs(" | Scenario: ", stdout);
@@ -438,6 +641,51 @@ static void test_parser(void) {
                        : "hung until test timeout",
               carriage_return_ok,
               "Runs in a disposable child so a parser loop cannot hang the suite.");
+
+  pid_t stress_child = fork();
+  if (stress_child == 0) {
+    static const char alphabet[] = "abc '\"\\|&<>$()";
+    alarm(4);
+    for (int sample = 0; sample < 2000; sample++) {
+      char input[160];
+      size_t length = (size_t)(sample % (int)(sizeof(input) - 1));
+      for (size_t i = 0; i < length; i++)
+        input[i] = alphabet[(sample * 17 + (int)i * 7) %
+                            (int)(sizeof(alphabet) - 1)];
+      input[length] = '\0';
+      memset(&tokens, 0, sizeof(tokens));
+      memset(&pipeline, 0, sizeof(pipeline));
+      error = NULL;
+      (void)shell_parse(input, &tokens, &pipeline, &error);
+      free(error);
+      shell_tokens_free(&tokens);
+      shell_pipeline_free(&pipeline);
+    }
+    _exit(0);
+  }
+  finished = 0;
+  child_status = 0;
+  for (int i = 0; stress_child > 0 && i < 450; i++) {
+    pid_t waited = waitpid(stress_child, &child_status, WNOHANG);
+    if (waited == stress_child) {
+      finished = 1;
+      break;
+    }
+    wait_milliseconds(10);
+  }
+  if (stress_child > 0 && !finished) {
+    kill(stress_child, SIGKILL);
+    waitpid(stress_child, &child_status, 0);
+  }
+  int parser_stress_ok = finished && WIFEXITED(child_status) &&
+                         WEXITSTATUS(child_status) == 0;
+  report_test("P014", "parser", "malformed-input crash and hang resistance",
+              "2,000 deterministic combinations of quotes and operators",
+              "child exits normally without hanging or crashing",
+              parser_stress_ok ? "all parser samples returned"
+                               : "parser child crashed or timed out",
+              parser_stress_ok,
+              "Runs in a disposable child so a parser fault cannot kill the suite.");
 }
 
 static void test_history(void) {
@@ -1678,7 +1926,7 @@ static void test_hotkeys(void) {
   }
 }
 
-typedef struct {
+struct TestWorker {
   int command_write;
   int output_read;
   int status_read;
@@ -1692,7 +1940,7 @@ typedef struct {
   SharedHistory *history;
   SharedForeground *foreground;
   char working_directory[TERM_PATH_BUFFER];
-} TestWorker;
+};
 
 static void *test_worker_thread(void *argument) {
   TestWorker *worker = argument;
@@ -1889,6 +2137,65 @@ static int worker_command(TestWorker *worker, const char *command,
   return worker_collect(worker, capture, capacity, message, 5000);
 }
 
+static int test_early_pipe_reader(int use_thread) {
+  SharedHistory *history = new_worker_history(use_thread);
+  SharedForeground *foreground = new_foreground();
+  if (!history || !foreground) {
+    if (history)
+      munmap(history, sizeof(*history));
+    if (foreground)
+      munmap(foreground, sizeof(*foreground));
+    return 0;
+  }
+
+  pid_t child = fork();
+  if (child == 0) {
+    signal(SIGPIPE, SIG_DFL);
+    alarm(12);
+    TestWorker worker;
+    worker_init(&worker);
+    int started = worker_start(&worker, use_thread, history, foreground,
+                               shell_directory, NULL, 0) == 0;
+    char output[256];
+    WorkerStatus status;
+    int command_ok = started &&
+                     worker_command(&worker,
+                                    "/usr/bin/yes | /usr/bin/head -n 1",
+                                    output, sizeof(output), &status) == 0 &&
+                     status.status == 0 && !strcmp(output, "y\n");
+    if (!command_ok) {
+      int process_group = atomic_load(&foreground->pgid);
+      if (process_group > 0)
+        kill(-process_group, SIGKILL);
+    }
+    if (started)
+      worker_stop(&worker);
+    _exit(command_ok ? 0 : 1);
+  }
+
+  int finished = 0;
+  int status = 0;
+  for (int elapsed = 0; child > 0 && elapsed < 140; elapsed++) {
+    pid_t waited = waitpid(child, &status, WNOHANG);
+    if (waited == child) {
+      finished = 1;
+      break;
+    }
+    wait_milliseconds(100);
+  }
+  if (child > 0 && !finished) {
+    int process_group = atomic_load(&foreground->pgid);
+    if (process_group > 0)
+      kill(-process_group, SIGKILL);
+    kill(child, SIGKILL);
+    waitpid(child, &status, 0);
+  }
+  sem_destroy(&history->semaphore);
+  munmap(history, sizeof(*history));
+  munmap(foreground, sizeof(*foreground));
+  return finished && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 static int worker_wait_output(TestWorker *worker, const char *first,
                               const char *second, const char *third,
                               char *capture, size_t capacity,
@@ -2075,6 +2382,231 @@ static void test_worker_execution_mode(int use_thread) {
               "clear signals GUI to clear this tab", mode,
               "status message has clear_screen set",
               clear_ok ? "clear_screen=1" : "clear_screen=0", clear_ok, "");
+
+  result = worker_command(&workers[0], "/usr/bin/printf '%s\\n' 'mode works'",
+                          output, sizeof(output), &status);
+  int mode_command_ok = result == 0 && status.status == 0 &&
+                        !strcmp(output, "mode works\n");
+  report_test(use_thread ? "W006" : "W106",
+              use_thread ? "Task 2: command execution (thread mode)"
+                         : "Task 2: command execution (process mode)",
+              "quoted external command runs through this mode",
+              "/usr/bin/printf '%s\\n' 'mode works'",
+              "prints one quoted argument and status 0",
+              mode_command_ok ? output : "command failed or output differed",
+              mode_command_ok, "");
+
+  worker_command(&workers[0], "/usr/bin/false", output, sizeof(output),
+                 &status);
+  int false_status = status.status == 1;
+  result = worker_command(&workers[0], "/usr/bin/printf '%s\\n' \"$?\"",
+                          output, sizeof(output), &status);
+  int last_status_ok = false_status && result == 0 && status.status == 0 &&
+                       !strcmp(output, "1\n");
+  report_test(use_thread ? "W016" : "W116",
+              use_thread ? "Task 2: last exit status (thread mode)"
+                         : "Task 2: last exit status (process mode)",
+              "$? retains the previous external command status",
+              "false; printf '%s\\n' \"$?\"", "prints 1",
+              last_status_ok ? output : "status differed", last_status_ok, "");
+
+  char source_path[TERM_PATH_BUFFER];
+  char source_command[TERM_LINE_MAX];
+  snprintf(source_path, sizeof(source_path), "%s/source-%s.commands",
+           test_root, mode);
+  write_text_file(source_path, "/usr/bin/printf sourced-mode\n");
+  snprintf(source_command, sizeof(source_command), "source %s", source_path);
+  result = worker_command(&workers[0], source_command, output, sizeof(output),
+                          &status);
+  int source_mode_ok = result == 0 && status.status == 0 &&
+                       contains(output, "sourced-mode");
+  report_test(use_thread ? "W017" : "W117",
+              use_thread ? "Task 2: source builtin (thread mode)"
+                         : "Task 2: source builtin (process mode)",
+              "source runs a command file in this tab's shell context",
+              source_command, "sourced-mode output and status 0",
+              source_mode_ok ? output : "source command failed",
+              source_mode_ok, "");
+
+  result = worker_command(&workers[0],
+                          "/usr/bin/printf '%s\\n' \"first\nsecond\"",
+                          output, sizeof(output), &status);
+  int multiline_mode_ok = result == 0 && status.status == 0 &&
+                          !strcmp(output, "first\nsecond\n");
+  report_test(use_thread ? "W007" : "W107",
+              use_thread ? "Task 3: multiline quoting (thread mode)"
+                         : "Task 3: multiline quoting (process mode)",
+              "worker keeps collecting input until a quoted command is complete",
+              "printf with a quoted argument spanning two lines",
+              "both lines print and worker returns status 0",
+              multiline_mode_ok ? output : "multiline command failed",
+              multiline_mode_ok, "");
+
+  char mode_redirect_path[TERM_PATH_BUFFER];
+  char mode_redirect_command[TERM_LINE_MAX];
+  snprintf(mode_redirect_path, sizeof(mode_redirect_path), "%s/redirect-%s.txt",
+           test_root, mode);
+  snprintf(mode_redirect_command, sizeof(mode_redirect_command),
+           "/usr/bin/printf redirected > %s", mode_redirect_path);
+  result = worker_command(&workers[0], mode_redirect_command, output,
+                          sizeof(output), &status);
+  char *mode_redirect_contents = read_text_file(mode_redirect_path);
+  int mode_redirect_ok = result == 0 && status.status == 0 &&
+                         mode_redirect_contents &&
+                         !strcmp(mode_redirect_contents, "redirected");
+  report_test(use_thread ? "W008" : "W108",
+              use_thread ? "Task 4: redirection (thread mode)"
+                         : "Task 4: redirection (process mode)",
+              "worker command writes output to a file",
+              mode_redirect_command, "file contains redirected",
+              mode_redirect_contents ? mode_redirect_contents : "no file",
+              mode_redirect_ok, "");
+  free(mode_redirect_contents);
+
+  char mode_input_path[512];
+  char mode_copy_path[512];
+  char mode_copy_command[TERM_LINE_MAX];
+  snprintf(mode_input_path, sizeof(mode_input_path), "%s/input-%s.txt",
+           test_root, mode);
+  snprintf(mode_copy_path, sizeof(mode_copy_path), "%s/copy-%s.txt",
+           test_root, mode);
+  write_text_file(mode_input_path, "input-data\n");
+  snprintf(mode_copy_command, sizeof(mode_copy_command),
+           "/bin/cat < %s > %s", mode_input_path, mode_copy_path);
+  result = worker_command(&workers[0], mode_copy_command, output,
+                          sizeof(output), &status);
+  char *mode_copy_contents = read_text_file(mode_copy_path);
+  int input_output_mode_ok = result == 0 && status.status == 0 &&
+                             mode_copy_contents &&
+                             !strcmp(mode_copy_contents, "input-data\n");
+  report_test(use_thread ? "W018" : "W118",
+              use_thread ? "Task 4: input/output redirection (thread mode)"
+                         : "Task 4: input/output redirection (process mode)",
+              "command reads one file and writes another",
+              mode_copy_command, "output file matches input file",
+              mode_copy_contents ? mode_copy_contents : "no output file",
+              input_output_mode_ok, "");
+  free(mode_copy_contents);
+  snprintf(mode_copy_command, sizeof(mode_copy_command),
+           "/usr/bin/printf appended >> %s", mode_copy_path);
+  result = worker_command(&workers[0], mode_copy_command, output,
+                          sizeof(output), &status);
+  mode_copy_contents = read_text_file(mode_copy_path);
+  int append_mode_ok = result == 0 && status.status == 0 &&
+                       mode_copy_contents &&
+                       !strcmp(mode_copy_contents, "input-data\nappended");
+  report_test(use_thread ? "W019" : "W119",
+              use_thread ? "Task 4: append redirection (thread mode)"
+                         : "Task 4: append redirection (process mode)",
+              "append preserves existing file bytes",
+              mode_copy_command, "file has the original and appended bytes",
+              mode_copy_contents ? mode_copy_contents : "no output file",
+              append_mode_ok, "");
+  free(mode_copy_contents);
+
+  result = worker_command(&workers[0],
+                         "/usr/bin/printf fail > /tmp", output,
+                         sizeof(output), &status);
+  int bad_redirection_ok = result == 0 && status.status != 0 &&
+                           contains(output, "/tmp");
+  report_test(use_thread ? "W013" : "W113",
+              use_thread ? "Task 4: invalid output path (thread mode)"
+                         : "Task 4: invalid output path (process mode)",
+              "redirection to a directory reports failure without crashing",
+              "/usr/bin/printf fail > /tmp",
+              "nonzero status and readable diagnostic",
+              output, bad_redirection_ok,
+              "Uses a directory path to exercise the open failure path.");
+
+  result = worker_command(
+      &workers[0],
+      "/usr/bin/printf alpha | /usr/bin/tr a-z A-Z | /usr/bin/cat",
+      output, sizeof(output), &status);
+  int mode_pipeline_ok = result == 0 && status.status == 0 &&
+                         !strcmp(output, "ALPHA");
+  report_test(use_thread ? "W009" : "W109",
+              use_thread ? "Task 5: pipeline (thread mode)"
+                         : "Task 5: pipeline (process mode)",
+              "three concurrently connected pipeline stages",
+              "printf alpha | tr a-z A-Z | cat", "prints ALPHA",
+              mode_pipeline_ok ? output : "pipeline failed or output differed",
+              mode_pipeline_ok, "");
+
+  int closed_reader_ok = test_early_pipe_reader(use_thread);
+  report_test(use_thread ? "W012" : "W112",
+              use_thread ? "Task 5: early pipe reader exit (thread mode)"
+                         : "Task 5: early pipe reader exit (process mode)",
+              "writer receives SIGPIPE after head closes its input",
+              "yes | head -n 1", "pipeline finishes with one line",
+              closed_reader_ok ? "one line; pipeline completed"
+                               : "pipeline hung, crashed, or failed",
+              closed_reader_ok,
+              "Checks that unused pipe ends close and the worker survives SIGPIPE.");
+
+  result = worker_command(&workers[0], "/bin/sh -c 'kill -SEGV $$'", output,
+                          sizeof(output), &status);
+  int command_crashed = result == 0 && status.status != 0;
+  int recovery_result =
+      worker_command(&workers[0], "/usr/bin/printf recovered", output,
+                     sizeof(output), &status);
+  int crash_recovery_ok = command_crashed && recovery_result == 0 &&
+                          status.status == 0 && contains(output, "recovered");
+  report_test(use_thread ? "W010" : "W110",
+              use_thread ? "Task 2: crash recovery (thread mode)"
+                         : "Task 2: crash recovery (process mode)",
+              "a command killed by SIGSEGV does not kill its tab worker",
+              "/bin/sh -c 'kill -SEGV $$'; then printf recovered",
+              "failed command returns; following command succeeds",
+              crash_recovery_ok ? "worker recovered after SIGSEGV"
+                                : "worker did not recover",
+              crash_recovery_ok,
+              "The disposable command child receives SIGSEGV; the worker must remain alive.");
+
+  result = worker_command(&workers[0], "/terminator-command-does-not-exist",
+                          output, sizeof(output), &status);
+  int missing_command_ok = result == 0 && status.status == 127 &&
+                           contains(output, "command not found");
+  report_test(use_thread ? "W014" : "W114",
+              use_thread ? "Task 2: unknown command (thread mode)"
+                         : "Task 2: unknown command (process mode)",
+              "exec failure is reported and the worker stays alive",
+              "/terminator-command-does-not-exist",
+              "status 127 and command-not-found diagnostic",
+              missing_command_ok ? "status 127 reported"
+                                 : "missing-command handling differed",
+              missing_command_ok, "");
+  int missing_recovery = worker_command(
+                             &workers[0], "/usr/bin/printf after-missing",
+                             output, sizeof(output), &status) == 0 &&
+                         status.status == 0 &&
+                         contains(output, "after-missing");
+  report_test(use_thread ? "W015" : "W115",
+              use_thread ? "Task 2: recovery after exec failure (thread mode)"
+                         : "Task 2: recovery after exec failure (process mode)",
+              "worker accepts a valid command after an exec failure",
+              "/usr/bin/printf after-missing",
+              "status 0 and output is present",
+              missing_recovery ? output : "worker did not recover",
+              missing_recovery, "");
+
+  if (!use_thread) {
+    int killed = workers[0].pid > 0 &&
+                 kill(workers[0].pid, SIGKILL) == 0;
+    int isolated_result =
+        worker_command(&workers[1], "/usr/bin/printf other-tab-alive", output,
+                       sizeof(output), &status);
+    int isolated_ok = killed && isolated_result == 0 && status.status == 0 &&
+                      contains(output, "other-tab-alive");
+    report_test("W111", "Task 1: process tab crash isolation",
+                "one tab worker is killed while a second tab remains usable",
+                "SIGKILL tab 1 worker; run printf in tab 2",
+                "tab 2 returns output and status 0",
+                isolated_ok ? "second process worker remains usable"
+                            : "another tab was affected",
+                isolated_ok,
+                "Task 1 explicitly requires a process-mode tab crash not to affect other tabs.");
+    worker_stop(&workers[0]);
+  }
 
   worker_stop(&workers[0]);
   worker_stop(&workers[1]);
@@ -2635,6 +3167,17 @@ static void test_job_control(void) {
     }
     char output[8192];
     WorkerStatus status;
+    int invalid_job_result =
+        worker_command(&worker, "fg %999", output, sizeof(output), &status);
+    int invalid_job_ok =
+        invalid_job_result == 0 && status.status != 0 && output[0] != '\0';
+    report_test(use_thread ? "J007" : "J107",
+                use_thread ? "Task 8: invalid job ID (thread mode)"
+                           : "Task 8: invalid job ID (process mode)",
+                "fg with an unknown job returns an error but keeps worker alive",
+                "fg %999", "nonzero status and diagnostic",
+                invalid_job_ok ? output : "invalid job was not rejected",
+                invalid_job_ok, "");
     worker_send(&worker, "/bin/sleep 10");
     int group = wait_for_foreground(foreground, 3000);
     int signal_sent = group > 0 && kill(-group, SIGINT) == 0;
@@ -2745,6 +3288,40 @@ static void test_multiwatch(void) {
                 "worker accepts a command after watcher stops", mode,
                 "prints after-watch", usable ? "after-watch" : output, usable,
                 "");
+
+    worker_send(
+        &worker,
+        "multiWatch [\"/bin/sh -c 'kill -SEGV $$'\",\"/usr/bin/printf '\\115\\127\\137\\117\\113\\n'\"]");
+    int survivor_ran =
+        worker_wait_output(&worker, "MW_OK", NULL, NULL, first_run,
+                           sizeof(first_run), 1, 4000) == 0;
+    group = wait_for_foreground(foreground, 3000);
+    signalled = group > 0 && kill(-group, SIGINT) == 0;
+    completed = signalled && worker_collect(&worker, output, sizeof(output),
+                                             &status, 4000) == 0;
+    int watcher_recovered = survivor_ran && completed &&
+                            status.status == 128 + SIGINT;
+    report_test(use_thread ? "M105" : "M005",
+                use_thread ? "Task 6: multiWatch child crash (thread mode)"
+                           : "Task 6: multiWatch child crash (process mode)",
+                "a crashing watched child does not stop its sibling or supervisor",
+                "watch a SIGSEGV command alongside printf survivor",
+                "MW_OK output appears and Ctrl+C returns status 130",
+                watcher_recovered ? "watcher stayed active until interrupted"
+                                  : "watcher did not recover from child crash",
+                watcher_recovered,
+                "The test interrupts the watcher as soon as the sibling runs.");
+    int after_crash_ok =
+        worker_command(&worker, "/usr/bin/printf watch-recovered", output,
+                       sizeof(output), &status) == 0 &&
+        status.status == 0 && contains(output, "watch-recovered");
+    report_test(use_thread ? "M106" : "M006",
+                use_thread ? "Task 6: multiWatch worker recovery (thread mode)"
+                           : "Task 6: multiWatch worker recovery (process mode)",
+                "tab worker accepts a command after the crashing watcher stops",
+                "printf watch-recovered", "status 0 and output is present",
+                after_crash_ok ? output : "worker did not recover",
+                after_crash_ok, "");
     worker_stop(&worker);
     sem_destroy(&history->semaphore);
     munmap(history, sizeof(*history));
@@ -2837,6 +3414,255 @@ static int send_gui_text(Display *display, Window window, const char *text) {
       return -1;
   }
   return 0;
+}
+
+static int send_gui_mouse_selection(Display *display, Window window,
+                                    int first_x, int last_x, int y) {
+  XEvent event = {0};
+  event.xbutton.type = ButtonPress;
+  event.xbutton.display = display;
+  event.xbutton.window = window;
+  event.xbutton.root = DefaultRootWindow(display);
+  event.xbutton.time = CurrentTime;
+  event.xbutton.x = first_x;
+  event.xbutton.y = y;
+  event.xbutton.button = Button1;
+  event.xbutton.same_screen = True;
+  if (!XSendEvent(display, window, True, ButtonPressMask, &event))
+    return -1;
+
+  event = (XEvent){0};
+  event.xmotion.type = MotionNotify;
+  event.xmotion.display = display;
+  event.xmotion.window = window;
+  event.xmotion.root = DefaultRootWindow(display);
+  event.xmotion.time = CurrentTime;
+  event.xmotion.x = last_x;
+  event.xmotion.y = y;
+  event.xmotion.state = Button1Mask;
+  event.xmotion.same_screen = True;
+  if (!XSendEvent(display, window, True, ButtonMotionMask, &event))
+    return -1;
+
+  event = (XEvent){0};
+  event.xbutton.type = ButtonRelease;
+  event.xbutton.display = display;
+  event.xbutton.window = window;
+  event.xbutton.root = DefaultRootWindow(display);
+  event.xbutton.time = CurrentTime;
+  event.xbutton.x = last_x;
+  event.xbutton.y = y;
+  event.xbutton.button = Button1;
+  event.xbutton.same_screen = True;
+  if (!XSendEvent(display, window, True, ButtonReleaseMask, &event))
+    return -1;
+
+  XFlush(display);
+  return 0;
+}
+
+static int read_gui_clipboard(Display *display, Window requestor,
+                              char *text, size_t text_size) {
+  Atom clipboard = XInternAtom(display, "CLIPBOARD", False);
+  Atom utf8 = XInternAtom(display, "UTF8_STRING", False);
+  Atom property = XInternAtom(display, "TERMINATOR_TEST_CLIPBOARD", False);
+  XDeleteProperty(display, requestor, property);
+  XConvertSelection(display, clipboard, utf8, property, requestor, CurrentTime);
+  XFlush(display);
+
+  XEvent event;
+  int notified = 0;
+  for (int tries = 0; tries < 300; tries++) {
+    XPending(display);
+    if (XCheckTypedWindowEvent(display, requestor, SelectionNotify, &event)) {
+      notified = 1;
+      break;
+    }
+    wait_milliseconds(10);
+  }
+  if (!notified || event.xselection.property == None)
+    return -1;
+
+  Atom actual_type;
+  int format;
+  unsigned long item_count, bytes_after;
+  unsigned char *data = NULL;
+  int status = XGetWindowProperty(display, requestor, property, 0, 4096, True,
+                                  AnyPropertyType, &actual_type, &format,
+                                  &item_count, &bytes_after, &data);
+  if (status != Success || format != 8 || !data) {
+    if (data)
+      XFree(data);
+    return -1;
+  }
+  size_t length = item_count < text_size - 1 ? (size_t)item_count : text_size - 1;
+  memcpy(text, data, length);
+  text[length] = '\0';
+  XFree(data);
+  return 0;
+}
+
+static int answer_clipboard_request(Display *display, Window owner,
+                                    const char *clipboard_text,
+                                    int reject_utf8) {
+  XEvent event;
+  XPending(display);
+  if (!XCheckTypedEvent(display, SelectionRequest, &event)) {
+    return 0;
+  }
+
+  XSelectionRequestEvent *request = &event.xselectionrequest;
+  if (request->owner != owner) {
+    fprintf(stderr, "clipboard test: request arrived for unexpected owner\n");
+    return -1;
+  }
+  Atom utf8 = XInternAtom(display, "UTF8_STRING", False);
+  Atom property = request->property == None ? request->target : request->property;
+  XSelectionEvent reply = {0};
+  reply.type = SelectionNotify;
+  reply.display = display;
+  reply.requestor = request->requestor;
+  reply.selection = request->selection;
+  reply.target = request->target;
+  reply.time = request->time;
+  reply.property = None;
+  if (request->target == utf8 && !reject_utf8) {
+    XChangeProperty(display, request->requestor, property, utf8, 8,
+                    PropModeReplace,
+                    (const unsigned char *)clipboard_text,
+                    (int)strlen(clipboard_text));
+    reply.property = property;
+  } else if (request->target == XA_STRING) {
+    Atom type = request->target == XA_STRING ? XA_STRING : utf8;
+    XChangeProperty(display, request->requestor, property, type, 8,
+                    PropModeReplace,
+                    (const unsigned char *)clipboard_text,
+                    (int)strlen(clipboard_text));
+    reply.property = property;
+  } else if (request->target != utf8) {
+    return -1;
+  }
+  XSendEvent(display, request->requestor, False, 0, (XEvent *)&reply);
+  XFlush(display);
+  return request->target == utf8 && reject_utf8 ? 2 : 1;
+}
+
+static int paste_external_command(Display *display, Window window,
+                                  Display *clipboard_display,
+                                  Window clipboard_window,
+                                  const char *history_path, const char *command,
+                                  const char *output, int reject_utf8) {
+  Atom clipboard = XInternAtom(clipboard_display, "CLIPBOARD", False);
+  XSetSelectionOwner(clipboard_display, clipboard, clipboard_window,
+                     CurrentTime);
+  XFlush(clipboard_display);
+  if (XGetSelectionOwner(clipboard_display, clipboard) != clipboard_window) {
+    fprintf(stderr, "clipboard paste test: could not own CLIPBOARD\n");
+    return -1;
+  }
+  if (send_gui_key(display, window, XK_v, ControlMask | ShiftMask) < 0) {
+    fprintf(stderr, "clipboard paste test: Ctrl+Shift+V send failed\n");
+    return -1;
+  }
+  /* Finish the server-side key delivery before waiting for selection data. */
+  XSync(display, False);
+
+  int request_answered = 0;
+  int request_seen = 0;
+  for (int tries = 0; tries < 300 && !request_answered; tries++) {
+    int answer = answer_clipboard_request(clipboard_display, clipboard_window,
+                                          command, reject_utf8);
+    if (answer < 0) {
+      fprintf(stderr, "clipboard paste test: unexpected request target/owner\n");
+      return -1;
+    }
+    if (answer != 0)
+      request_seen = 1;
+    if (answer == 1)
+      request_answered = 1;
+    /* Retry once if XSendEvent has not reached the GUI yet. */
+    if (!request_seen && (tries == 49 || tries == 149) &&
+        send_gui_key(display, window, XK_v, ControlMask | ShiftMask) < 0) {
+      fprintf(stderr, "clipboard paste test: retry key send failed\n");
+      return -1;
+    }
+    if (!request_seen && (tries == 49 || tries == 149))
+      XSync(display, False);
+    wait_milliseconds(10);
+  }
+  if (!request_answered) {
+    fprintf(stderr, "clipboard paste test: selection request timed out\n");
+    return -1;
+  }
+
+  /* Answer any duplicate requests caused by the bounded key retry. */
+  for (int tries = 0; tries < 5; tries++) {
+    int answer = answer_clipboard_request(clipboard_display, clipboard_window,
+                                          command, reject_utf8);
+    if (answer < 0) {
+      fprintf(stderr, "clipboard paste test: unexpected retry request\n");
+      return -1;
+    }
+    wait_milliseconds(10);
+  }
+
+  wait_milliseconds(100);
+  if (send_gui_key(display, window, XK_Return, 0) < 0) {
+    fprintf(stderr, "clipboard paste test: Enter send failed\n");
+    return -1;
+  }
+  wait_milliseconds(300);
+  char *history = read_text_file(history_path);
+  int command_saved = history && contains(history, command);
+  free(history);
+  int output_visible = gui_find_text_line(display, window, output, -1) >= 0;
+  if (!command_saved || !output_visible)
+    fprintf(stderr,
+            "clipboard paste test: saved=%d output_visible=%d expected=%s\n",
+            command_saved, output_visible, command);
+  return command_saved && output_visible ? 0 : -1;
+}
+
+static int test_gui_clipboard_copy(Display *display, Window window,
+                                   Display *clipboard_display,
+                                   Window clipboard_window) {
+  static const char copied_text[] = "TERMINATOR_COPY_MARKER";
+  int baseline = gui_find_text_line(display, window, copied_text, -1);
+  XFontStruct *font = XLoadQueryFont(display, "9x15");
+  if (!font)
+    font = XLoadQueryFont(display, "fixed");
+  int result = -1;
+  if (baseline < 0)
+    fprintf(stderr, "clipboard test: output marker was not rendered\n");
+  if (baseline >= 0 && font) {
+    int right_x = 12 + XTextWidth(font, copied_text, (int)strlen(copied_text));
+    int selected = send_gui_mouse_selection(display, window, 12, right_x,
+                                            baseline) == 0;
+    int copied = selected && send_gui_key(display, window, XK_c,
+                                          ControlMask | ShiftMask) == 0;
+    if (!selected)
+      fprintf(stderr, "clipboard test: mouse selection event failed\n");
+    else if (!copied)
+      fprintf(stderr, "clipboard test: Ctrl+Shift+C event failed\n");
+    else {
+      char clipboard_text[128];
+      int read_ok = read_gui_clipboard(clipboard_display, clipboard_window,
+                                       clipboard_text,
+                                       sizeof(clipboard_text)) == 0;
+      if (read_ok && !strcmp(clipboard_text, copied_text)) {
+        result = 0;
+      } else {
+        fprintf(stderr, "clipboard test: copied value was %s%s\n",
+                read_ok ? "" : "unavailable; expected ",
+                read_ok ? clipboard_text : copied_text);
+      }
+    }
+  } else if (!font)
+    fprintf(stderr, "clipboard test: test font could not be loaded\n");
+  if (font)
+    XFreeFont(display, font);
+
+  return result;
 }
 
 static void wait_milliseconds(long milliseconds) {
@@ -2938,11 +3764,248 @@ static int gui_lines_are_ordered(Display *display, Window window,
   return first_line >= 0 && second_line > first_line;
 }
 
+static int send_gui_button(Display *display, Window window, int x, int y,
+                           unsigned int button) {
+  XEvent event = {0};
+  event.xbutton.type = ButtonPress;
+  event.xbutton.display = display;
+  event.xbutton.window = window;
+  event.xbutton.root = DefaultRootWindow(display);
+  event.xbutton.time = CurrentTime;
+  event.xbutton.x = x;
+  event.xbutton.y = y;
+  event.xbutton.button = button;
+  event.xbutton.same_screen = True;
+  int sent = XSendEvent(display, window, True, ButtonPressMask, &event);
+  XFlush(display);
+  return sent ? 0 : -1;
+}
+
+static int gui_command_was_saved(const char *history_path,
+                                 const char *command) {
+  char *history = read_text_file(history_path);
+  int saved = history && contains(history, command);
+  free(history);
+  return saved;
+}
+
+static int test_gui_tab_switching(Display *display, Window window,
+                                  const char *working_directory) {
+  if (send_gui_key(display, window, XK_t, ControlMask) < 0)
+    return -1;
+  wait_milliseconds(150);
+  if (send_gui_text(display, window, "cd /tmp") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(150);
+  if (send_gui_text(display, window, "/usr/bin/pwd") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(250);
+  int second_tab_ok = gui_find_text_line(display, window, "/tmp", -1) >= 0;
+
+  if (send_gui_button(display, window, 50, 20, Button1) < 0 ||
+      send_gui_text(display, window, "/usr/bin/pwd") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(250);
+  int first_tab_ok =
+      gui_find_text_line(display, window, working_directory, -1) >= 0;
+
+  if (send_gui_button(display, window, 220, 20, Button1) < 0 ||
+      send_gui_key(display, window, XK_d, ControlMask) < 0)
+    return -1;
+  wait_milliseconds(200);
+  return first_tab_ok && second_tab_ok ? 0 : -1;
+}
+
+static int test_gui_editor(Display *display, Window window,
+                           const char *history_path) {
+  if (send_gui_text(display, window, "/usr/bin/echo EDITOR_REMOVE") < 0 ||
+      send_gui_key(display, window, XK_w, ControlMask) < 0 ||
+      send_gui_text(display, window, "EDITOR_OK") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(250);
+  int delete_word_ok = gui_command_was_saved(
+      history_path, "/usr/bin/echo EDITOR_OK\n");
+
+  if (send_gui_text(display, window, "/usr/bin/echo KEEP TRIM") < 0)
+    return -1;
+  for (int i = 0; i < 5; i++)
+    if (send_gui_key(display, window, XK_Left, 0) < 0)
+      return -1;
+  if (send_gui_key(display, window, XK_k, ControlMask) < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(250);
+  int delete_to_end_ok =
+      gui_command_was_saved(history_path, "/usr/bin/echo KEEP\n");
+
+  if (send_gui_text(display, window, "/usr/bin/echo MOVE") < 0 ||
+      send_gui_key(display, window, XK_a, ControlMask) < 0 ||
+      send_gui_key(display, window, XK_e, ControlMask) < 0 ||
+      send_gui_text(display, window, "_END") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(250);
+  int cursor_keys_ok =
+      gui_command_was_saved(history_path, "/usr/bin/echo MOVE_END\n");
+
+  if (send_gui_text(display, window, "discard this line") < 0 ||
+      send_gui_key(display, window, XK_u, ControlMask) < 0 ||
+      send_gui_text(display, window, "/usr/bin/echo CLEAR_OK") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(250);
+  char *history = read_text_file(history_path);
+  int delete_to_start_ok = history && contains(history, "/usr/bin/echo CLEAR_OK\n") &&
+                           !contains(history, "discard this line");
+  free(history);
+  return delete_word_ok && delete_to_end_ok && cursor_keys_ok &&
+                 delete_to_start_ok
+             ? 0
+             : -1;
+}
+
+static int test_gui_scrollback(Display *display, Window window) {
+  if (send_gui_text(display, window, "/usr/bin/seq 1 50") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(450);
+  int latest_visible = gui_find_text_line(display, window, "50", -1) >= 0;
+
+  if (send_gui_key(display, window, XK_Page_Up, 0) < 0)
+    return -1;
+  wait_milliseconds(100);
+  int page_up_visible = gui_find_text_line(display, window, "1", -1) >= 0;
+
+  if (send_gui_key(display, window, XK_Page_Down, 0) < 0)
+    return -1;
+  wait_milliseconds(100);
+  int page_down_visible = gui_find_text_line(display, window, "50", -1) >= 0;
+
+  if (send_gui_button(display, window, 30, 100, Button4) < 0)
+    return -1;
+  wait_milliseconds(100);
+  int wheel_up_visible = gui_find_text_line(display, window, "47", -1) >= 0;
+  if (send_gui_button(display, window, 30, 100, Button5) < 0)
+    return -1;
+  wait_milliseconds(100);
+  int wheel_down_visible = gui_find_text_line(display, window, "50", -1) >= 0;
+  return latest_visible && page_up_visible && page_down_visible &&
+                 wheel_up_visible && wheel_down_visible
+             ? 0
+             : -1;
+}
+
+static int test_gui_interrupt(Display *display, Window window) {
+  if (send_gui_text(display, window, "/bin/sleep 10") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(150);
+  if (send_gui_key(display, window, XK_c, ControlMask) < 0)
+    return -1;
+  wait_milliseconds(200);
+  if (send_gui_text(display, window, "/usr/bin/printf GUI_SIGNAL_OK") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(350);
+  return gui_find_text_line(display, window, "GUI_SIGNAL_OK", -1) >= 0 ? 0
+                                                                       : -1;
+}
+
+static size_t read_app_children(pid_t app_pid, pid_t *children,
+                                size_t child_capacity) {
+  char path[128];
+  snprintf(path, sizeof(path), "/proc/%ld/task/%ld/children",
+           (long)app_pid, (long)app_pid);
+  FILE *file = fopen(path, "r");
+  if (!file)
+    return 0;
+  size_t count = 0;
+  long child_pid;
+  while (count < child_capacity && fscanf(file, "%ld", &child_pid) == 1)
+    children[count++] = (pid_t)child_pid;
+  fclose(file);
+  return count;
+}
+
+static int test_gui_worker_crash(Display *display, Window window,
+                                 pid_t app_pid, int process_mode) {
+  if (!process_mode) {
+    if (send_gui_text(display, window, "/bin/sh -c 'kill -SEGV $$'") < 0 ||
+        send_gui_key(display, window, XK_Return, 0) < 0)
+      return -1;
+    wait_milliseconds(250);
+    if (send_gui_text(display, window,
+                      "/usr/bin/printf GUI_AFTER_COMMAND_CRASH") < 0 ||
+        send_gui_key(display, window, XK_Return, 0) < 0)
+      return -1;
+    wait_milliseconds(300);
+    return gui_find_text_line(display, window, "GUI_AFTER_COMMAND_CRASH", -1) >= 0
+               ? 0
+               : -1;
+  }
+
+  pid_t previous[TERM_MAX_TABS];
+  size_t previous_count =
+      read_app_children(app_pid, previous, TERM_MAX_TABS);
+  if (!previous_count || send_gui_key(display, window, XK_t, ControlMask) < 0)
+    return -1;
+
+  pid_t new_worker = 0;
+  for (int attempt = 0; attempt < 50 && !new_worker; attempt++) {
+    pid_t current[TERM_MAX_TABS];
+    size_t current_count =
+        read_app_children(app_pid, current, TERM_MAX_TABS);
+    for (size_t i = 0; i < current_count; i++) {
+      int was_present = 0;
+      for (size_t j = 0; j < previous_count; j++)
+        if (current[i] == previous[j])
+          was_present = 1;
+      if (!was_present) {
+        new_worker = current[i];
+        break;
+      }
+    }
+    if (!new_worker)
+      wait_milliseconds(20);
+  }
+  if (new_worker <= 0 || kill(new_worker, SIGKILL) < 0)
+    return -1;
+
+  wait_milliseconds(250);
+  if (send_gui_button(display, window, 50, 20, Button1) < 0 ||
+      send_gui_text(display, window,
+                    "/usr/bin/printf GUI_AFTER_TAB_CRASH") < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0)
+    return -1;
+  wait_milliseconds(350);
+  return kill(app_pid, 0) == 0 &&
+                 gui_find_text_line(display, window, "GUI_AFTER_TAB_CRASH", -1) >= 0
+             ? 0
+             : -1;
+}
+
 static int run_gui_feature_test(const char *mode_argument,
-                                const char *mode_name, int *completion_ok_out,
-                                int *search_ok_out) {
+                                const char *mode_name, int *clipboard_ok_out,
+                                int *clipboard_fallback_ok_out,
+                                int *tab_switch_ok_out, int *scroll_ok_out,
+                                int *editor_ok_out, int *clear_ok_out,
+                                int *signal_ok_out,
+                                int *completion_ok_out, int *search_ok_out,
+                                int *crash_ok_out) {
+  *clipboard_ok_out = 0;
+  *clipboard_fallback_ok_out = 0;
+  *tab_switch_ok_out = 0;
+  *scroll_ok_out = 0;
+  *editor_ok_out = 0;
+  *clear_ok_out = 0;
+  *signal_ok_out = 0;
   *completion_ok_out = 0;
   *search_ok_out = 0;
+  *crash_ok_out = 0;
   char gui_directory[TERM_PATH_BUFFER];
   char gui_home[TERM_PATH_BUFFER];
   char unique_file[TERM_PATH_BUFFER];
@@ -3006,26 +4069,70 @@ static int run_gui_feature_test(const char *mode_argument,
     waitpid(child, NULL, 0);
     return -1;
   }
+  Display *clipboard_display = XOpenDisplay(NULL);
+  if (!clipboard_display) {
+    XCloseDisplay(display);
+    kill(child, SIGTERM);
+    waitpid(child, NULL, 0);
+    return -1;
+  }
   Window window = None;
   for (int tries = 0; tries < 50 && window == None; tries++) {
     window = find_terminator_window(display);
     if (window == None)
       wait_milliseconds(50);
   }
+  Window clipboard_window = XCreateSimpleWindow(
+      clipboard_display, DefaultRootWindow(clipboard_display), 0, 0, 1, 1, 0,
+      0, 0);
+  if (clipboard_window != None) {
+    XMapWindow(clipboard_display, clipboard_window);
+    XSync(clipboard_display, False);
+  }
 
   int result = 0;
   int search_order_ok = 1;
-  if (window == None || send_gui_text(display, window, "cd ") < 0 ||
+  if (window == None || clipboard_window == None ||
+      send_gui_text(display, window, "cd ") < 0 ||
       send_gui_text(display, window, gui_directory) < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0) {
     result = -1;
   } else {
     wait_milliseconds(250);
-    if (send_gui_text(display, window, "cat terminator-completion-uniq") < 0 ||
-        send_gui_key(display, window, XK_Tab, 0) < 0 ||
+    if (send_gui_text(display, window,
+                      "/usr/bin/echo TERMINATOR_COPY_MARKER") < 0 ||
         send_gui_key(display, window, XK_Return, 0) < 0) {
       result = -1;
     } else {
+      wait_milliseconds(300);
+      int copied = test_gui_clipboard_copy(display, window, clipboard_display,
+                                           clipboard_window) == 0;
+      *clipboard_ok_out =
+          copied &&
+          paste_external_command(display, window, clipboard_display,
+                                 clipboard_window,
+                                 history_path,
+                                 "/usr/bin/echo TERMINATOR_PASTE_MARKER",
+                                 "TERMINATOR_PASTE_MARKER", 0) == 0;
+      *clipboard_fallback_ok_out =
+          *clipboard_ok_out &&
+          paste_external_command(
+              display, window, clipboard_display, clipboard_window, history_path,
+              "/usr/bin/echo TERMINATOR_FALLBACK_MARKER",
+              "TERMINATOR_FALLBACK_MARKER", 1) == 0;
+      *tab_switch_ok_out =
+          test_gui_tab_switching(display, window, gui_directory) == 0;
+      *crash_ok_out = test_gui_worker_crash(
+                          display, window, child, mode_argument != NULL) == 0;
+      *editor_ok_out = test_gui_editor(display, window, history_path) == 0;
+      *scroll_ok_out = test_gui_scrollback(display, window) == 0;
+    }
+    if (result == 0 &&
+        (send_gui_text(display, window, "cat terminator-completion-uniq") < 0 ||
+        send_gui_key(display, window, XK_Tab, 0) < 0 ||
+         send_gui_key(display, window, XK_Return, 0) < 0)) {
+      result = -1;
+    } else if (result == 0) {
       wait_milliseconds(250);
       if (send_gui_text(display, window, "cat pick-") < 0 ||
           send_gui_key(display, window, XK_Tab, 0) < 0 ||
@@ -3151,6 +4258,16 @@ static int run_gui_feature_test(const char *mode_argument,
   *search_ok_out = result == 0 && search_not_submitted && search_order_ok;
   free(history_text);
 
+  if (send_gui_key(display, window, XK_l, ControlMask) == 0) {
+    wait_milliseconds(100);
+    *clear_ok_out =
+        gui_find_text_line(display, window, "TERMINATOR_COPY_MARKER", -1) < 0 &&
+        gui_find_text_line(display, window, "50", -1) < 0;
+  }
+  *signal_ok_out = test_gui_interrupt(display, window) == 0;
+
+  XDestroyWindow(clipboard_display, clipboard_window);
+  XCloseDisplay(clipboard_display);
   XCloseDisplay(display);
   kill(child, SIGTERM);
   int finished = 0;
@@ -3256,6 +4373,33 @@ static void run_selected(const char *selection) {
                   "make terminator", "GUI history search runs",
                   "application build failed", 0,
                   "The core build failed before GUI input could be tested.");
+      report_test("G005", "X11 clipboard", "thread-mode mouse selection and Ctrl+Shift+C/V",
+                  "make terminator", "GUI copy and paste work",
+                  "application build failed", 0,
+                  "The core build failed before clipboard exchange could be tested.");
+      report_test("G006", "X11 clipboard", "thread-mode STRING fallback",
+                  "clipboard rejects UTF8_STRING", "paste retries with XA_STRING",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G007", "GUI tabs", "thread-mode tab switching and close",
+                  "Ctrl+T; cd /tmp; switch tabs; Ctrl+D", "tab state stays independent",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G008", "GUI scrollback", "thread-mode keyboard and mouse scrolling",
+                  "seq 1 50; Page Up/Down; wheel up/down", "older and latest lines are visible",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G009", "GUI hotkeys", "thread-mode clear screen",
+                  "Ctrl+L", "old output is removed", "application build failed", 0,
+                  "GUI build failed.");
+      report_test("G010", "GUI hotkeys", "thread-mode editable cursor operations",
+                  "Ctrl+A/E, Ctrl+U/K/W, arrows", "edited commands execute as expected",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G011", "GUI signals", "thread-mode Ctrl+C recovery",
+                  "sleep 10; Ctrl+C; printf", "worker accepts a later command",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G012", "Task 1: thread-mode command crash recovery",
+                  "a crashing command does not terminate the GUI or tab worker",
+                  "run a SIGSEGV child, then print a recovery marker",
+                  "GUI remains responsive and displays the marker",
+                  "application build failed", 0, "GUI build failed.");
       report_test("G103", "filename completion",
                   "process-mode typing and numbered choice", "make terminator",
                   "GUI completion interaction runs", "application build failed",
@@ -3264,6 +4408,33 @@ static void run_selected(const char *selection) {
                   "make terminator", "GUI history search runs",
                   "application build failed", 0,
                   "The core build failed before GUI input could be tested.");
+      report_test("G105", "X11 clipboard", "process-mode mouse selection and Ctrl+Shift+C/V",
+                  "make terminator", "GUI copy and paste work",
+                  "application build failed", 0,
+                  "The core build failed before clipboard exchange could be tested.");
+      report_test("G106", "X11 clipboard", "process-mode STRING fallback",
+                  "clipboard rejects UTF8_STRING", "paste retries with XA_STRING",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G107", "GUI tabs", "process-mode tab switching and close",
+                  "Ctrl+T; cd /tmp; switch tabs; Ctrl+D", "tab state stays independent",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G108", "GUI scrollback", "process-mode keyboard and mouse scrolling",
+                  "seq 1 50; Page Up/Down; wheel up/down", "older and latest lines are visible",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G109", "GUI hotkeys", "process-mode clear screen",
+                  "Ctrl+L", "old output is removed", "application build failed", 0,
+                  "GUI build failed.");
+      report_test("G110", "GUI hotkeys", "process-mode editable cursor operations",
+                  "Ctrl+A/E, Ctrl+U/K/W, arrows", "edited commands execute as expected",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G111", "GUI signals", "process-mode Ctrl+C recovery",
+                  "sleep 10; Ctrl+C; printf", "worker accepts a later command",
+                  "application build failed", 0, "GUI build failed.");
+      report_test("G112", "Task 1: process-mode tab crash isolation",
+                  "killing one tab worker leaves the GUI and another tab usable",
+                  "kill new tab worker; run a command in the original tab",
+                  "GUI remains responsive and displays the marker",
+                  "application build failed", 0, "GUI build failed.");
     } else if (!getenv("DISPLAY")) {
       report_skip("G001", "X11 GUI", "thread-mode startup", "DISPLAY is not set");
       report_skip("G002", "X11 GUI", "process-mode startup", "DISPLAY is not set");
@@ -3271,9 +4442,42 @@ static void run_selected(const char *selection) {
                   "DISPLAY is not set");
       report_skip("G004", "history search", "thread-mode Ctrl+R search",
                   "DISPLAY is not set");
+      report_skip("G005", "X11 clipboard", "thread-mode mouse selection and Ctrl+Shift+C/V",
+                  "DISPLAY is not set");
+      report_skip("G006", "X11 clipboard", "thread-mode STRING fallback",
+                  "DISPLAY is not set");
+      report_skip("G007", "GUI tabs", "thread-mode tab switching and close",
+                  "DISPLAY is not set");
+      report_skip("G008", "GUI scrollback", "thread-mode keyboard and mouse scrolling",
+                  "DISPLAY is not set");
+      report_skip("G009", "GUI hotkeys", "thread-mode clear screen",
+                  "DISPLAY is not set");
+      report_skip("G010", "GUI hotkeys", "thread-mode editable cursor operations",
+                  "DISPLAY is not set");
+      report_skip("G011", "GUI signals", "thread-mode Ctrl+C recovery",
+                  "DISPLAY is not set");
+      report_skip("G012", "Task 1: thread-mode command crash recovery",
+                  "command crash and worker recovery", "DISPLAY is not set");
       report_skip("G103", "filename completion", "process-mode typing and numbered choice",
                   "DISPLAY is not set");
       report_skip("G104", "history search", "process-mode Ctrl+R search",
+                  "DISPLAY is not set");
+      report_skip("G105", "X11 clipboard", "process-mode mouse selection and Ctrl+Shift+C/V",
+                  "DISPLAY is not set");
+      report_skip("G106", "X11 clipboard", "process-mode STRING fallback",
+                  "DISPLAY is not set");
+      report_skip("G107", "GUI tabs", "process-mode tab switching and close",
+                  "DISPLAY is not set");
+      report_skip("G108", "GUI scrollback", "process-mode keyboard and mouse scrolling",
+                  "DISPLAY is not set");
+      report_skip("G109", "GUI hotkeys", "process-mode clear screen",
+                  "DISPLAY is not set");
+      report_skip("G110", "GUI hotkeys", "process-mode editable cursor operations",
+                  "DISPLAY is not set");
+      report_skip("G111", "GUI signals", "process-mode Ctrl+C recovery",
+                  "DISPLAY is not set");
+      report_skip("G112", "Task 1: process-mode tab crash isolation",
+                  "kill one process tab worker while retaining another",
                   "DISPLAY is not set");
     } else {
       int result = run_gui_smoke(NULL);
@@ -3288,8 +4492,19 @@ static void run_selected(const char *selection) {
                   result == 0, "Headless X11 smoke test; it does not inspect pixels.");
       int completion_ok = 0;
       int search_ok = 0;
+      int clipboard_ok = 0;
+      int fallback_ok = 0;
+      int tab_switch_ok = 0;
+      int scroll_ok = 0;
+      int editor_ok = 0;
+      int clear_ok = 0;
+      int signal_ok = 0;
+      int crash_ok = 0;
       result = run_gui_feature_test(NULL, "gui-thread-history",
-                                    &completion_ok, &search_ok);
+                                    &clipboard_ok, &fallback_ok, &tab_switch_ok,
+                                    &scroll_ok, &editor_ok, &clear_ok,
+                                    &signal_ok, &completion_ok, &search_ok,
+                                    &crash_ok);
       report_test("G003", "filename completion",
                   "thread-mode typing, unique completion, and numbered choice",
                   "type with Tab; reject 9; erase it; choose 3; try a no-match Tab",
@@ -3306,8 +4521,58 @@ static void run_selected(const char *selection) {
                             : "transcript order or history check failed",
                   search_ok,
                   "Checks rendered X11 text and persistent history.");
+      report_test("G005", "X11 clipboard",
+                  "thread-mode mouse selection and Ctrl+Shift+C/V",
+                  "drag over output; copy to a second X client; paste a command",
+                  "copied bytes match and pasted command runs",
+                  clipboard_ok ? "copy and paste worked"
+                               : "selection, copy, or paste failed",
+                  clipboard_ok,
+                  "Exercises X11 selection requests and the real GUI key handler.");
+      report_test("G006", "X11 clipboard", "thread-mode STRING fallback",
+                  "clipboard rejects UTF8_STRING", "paste retries with XA_STRING",
+                  fallback_ok ? "fallback text executed"
+                              : "STRING fallback failed",
+                  fallback_ok, "Exercises the selection conversion retry path.");
+      report_test("G007", "GUI tabs", "thread-mode tab switching and close",
+                  "Ctrl+T; cd /tmp; switch tabs; Ctrl+D",
+                  "each tab keeps its directory and can close independently",
+                  tab_switch_ok ? "both tabs kept their directories"
+                                : "tab state, switching, or close failed",
+                  tab_switch_ok, "Checks actual GUI tab input and rendered output.");
+      report_test("G008", "GUI scrollback", "thread-mode keyboard and mouse scrolling",
+                  "seq 1 50; Page Up/Down; wheel up/down",
+                  "older and latest output lines are visible",
+                  scroll_ok ? "keyboard and mouse scrolling passed"
+                            : "scroll position or visible line was wrong",
+                  scroll_ok, "Checks rendered output in the X11 viewport.");
+      report_test("G009", "GUI hotkeys", "thread-mode clear screen", "Ctrl+L",
+                  "old output is removed", clear_ok ? "scrollback cleared"
+                                                    : "old output remained visible",
+                  clear_ok, "Checks the keyboard handler and rendered view.");
+      report_test("G010", "GUI hotkeys", "thread-mode editable cursor operations",
+                  "Ctrl+A/E, Ctrl+U/K/W, arrows",
+                  "edited commands execute as expected",
+                  editor_ok ? "edited commands were saved correctly"
+                            : "input editing did not match expected commands",
+                  editor_ok, "Checks the command buffer through submitted commands.");
+      report_test("G011", "GUI signals", "thread-mode Ctrl+C recovery",
+                  "sleep 10; Ctrl+C; printf", "worker accepts a later command",
+                  signal_ok ? "command interrupted and worker recovered"
+                            : "Ctrl+C did not return a working prompt",
+                  signal_ok, "The GUI sends SIGINT to the active job group.");
+      report_test("G012", "Task 1: thread-mode command crash recovery",
+                  "a crashing command does not terminate the GUI or tab worker",
+                  "run a SIGSEGV child, then print a recovery marker",
+                  "GUI remains responsive and displays the marker",
+                  crash_ok ? "GUI accepted a command after SIGSEGV"
+                           : "GUI or worker failed to recover",
+                  crash_ok, "The fatal signal is delivered only to the command child.");
       result = run_gui_feature_test("useProcess=True", "gui-process-history",
-                                    &completion_ok, &search_ok);
+                                    &clipboard_ok, &fallback_ok, &tab_switch_ok,
+                                    &scroll_ok, &editor_ok, &clear_ok,
+                                    &signal_ok, &completion_ok, &search_ok,
+                                    &crash_ok);
       report_test("G103", "filename completion",
                   "process-mode typing, unique completion, and numbered choice",
                   "type with Tab; reject 9; erase it; choose 3; try a no-match Tab",
@@ -3324,8 +4589,60 @@ static void run_selected(const char *selection) {
                             : "transcript order or history check failed",
                   search_ok,
                   "Checks rendered X11 text and persistent history.");
+      report_test("G105", "X11 clipboard",
+                  "process-mode mouse selection and Ctrl+Shift+C/V",
+                  "drag over output; copy to a second X client; paste a command",
+                  "copied bytes match and pasted command runs",
+                  clipboard_ok ? "copy and paste worked"
+                               : "selection, copy, or paste failed",
+                  clipboard_ok,
+                  "Exercises X11 selection requests and the real GUI key handler.");
+      report_test("G106", "X11 clipboard", "process-mode STRING fallback",
+                  "clipboard rejects UTF8_STRING", "paste retries with XA_STRING",
+                  fallback_ok ? "fallback text executed"
+                              : "STRING fallback failed",
+                  fallback_ok, "Exercises the selection conversion retry path.");
+      report_test("G107", "GUI tabs", "process-mode tab switching and close",
+                  "Ctrl+T; cd /tmp; switch tabs; Ctrl+D",
+                  "each tab keeps its directory and can close independently",
+                  tab_switch_ok ? "both tabs kept their directories"
+                                : "tab state, switching, or close failed",
+                  tab_switch_ok, "Checks actual GUI tab input and rendered output.");
+      report_test("G108", "GUI scrollback", "process-mode keyboard and mouse scrolling",
+                  "seq 1 50; Page Up/Down; wheel up/down",
+                  "older and latest output lines are visible",
+                  scroll_ok ? "keyboard and mouse scrolling passed"
+                            : "scroll position or visible line was wrong",
+                  scroll_ok, "Checks rendered output in the X11 viewport.");
+      report_test("G109", "GUI hotkeys", "process-mode clear screen", "Ctrl+L",
+                  "old output is removed", clear_ok ? "scrollback cleared"
+                                                    : "old output remained visible",
+                  clear_ok, "Checks the keyboard handler and rendered view.");
+      report_test("G110", "GUI hotkeys", "process-mode editable cursor operations",
+                  "Ctrl+A/E, Ctrl+U/K/W, arrows",
+                  "edited commands execute as expected",
+                  editor_ok ? "edited commands were saved correctly"
+                            : "input editing did not match expected commands",
+                  editor_ok, "Checks the command buffer through submitted commands.");
+      report_test("G111", "GUI signals", "process-mode Ctrl+C recovery",
+                  "sleep 10; Ctrl+C; printf", "worker accepts a later command",
+                  signal_ok ? "command interrupted and worker recovered"
+                            : "Ctrl+C did not return a working prompt",
+                  signal_ok, "The GUI sends SIGINT to the active job group.");
+      report_test("G112", "Task 1: process-mode tab crash isolation",
+                  "killing one tab worker leaves the GUI and another tab usable",
+                  "kill new tab worker; run a command in the original tab",
+                  "GUI remains responsive and displays the marker",
+                  crash_ok ? "original tab and GUI stayed usable"
+                           : "GUI or remaining tab stopped responding",
+                  crash_ok,
+                  "Kills the actual second worker child and checks the original tab.");
     }
   }
+  if (all)
+    report_skip("T110", "Task 11: custom Bash-subset interpreter",
+                "script-interpreter requirement audit",
+                "Task 11 is not implemented; source runs lines through the existing shell.");
 }
 
 int main(int argument_count, char **arguments) {
@@ -3357,10 +4674,30 @@ int main(int argument_count, char **arguments) {
   run_selected(arguments[1]);
   report_summary();
   int failed = failed_tests != 0;
+  const char *report_path = getenv("TERMINATOR_JUNIT_REPORT");
+  if (report_path && write_junit_report(report_path) < 0) {
+    fprintf(stderr, "could not write JUnit report to %s\n", report_path);
+    failed = 1;
+  }
+  if (test_record_error) {
+    fprintf(stderr, "could not store all test results for the report\n");
+    failed = 1;
+  }
   if (remove_tree(test_root) < 0) {
     fprintf(stderr, "test cleanup failed for %s\n", test_root);
     failed = 1;
   }
   free(test_root);
+  for (size_t i = 0; i < test_record_count; i++) {
+    free(test_records[i].id);
+    free(test_records[i].task);
+    free(test_records[i].feature);
+    free(test_records[i].scenario);
+    free(test_records[i].input);
+    free(test_records[i].expected);
+    free(test_records[i].actual);
+    free(test_records[i].notes);
+  }
+  free(test_records);
   return failed ? 1 : 0;
 }

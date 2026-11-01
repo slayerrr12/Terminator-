@@ -19,6 +19,7 @@ TEST_SOURCES = tests/test_suite.c src/parser.c src/executor.c src/shell.c \
 	src/multiwatch.c src/history.c src/scrollback.c src/hotkeys.c \
 	src/completion.c
 TEST_BINARY = build/tests/test_suite
+TEST_REPORT_DIR = $(CURDIR)/build/tests/reports
 
 # Running "make" builds the application.
 .PHONY: all run clean test test-unit test-integration test-regression \
@@ -43,30 +44,37 @@ $(TEST_BINARY): $(TEST_SOURCES) include/terminator.h include/shell.h \
 
 # Run each suite category independently.
 test-unit: $(TEST_BINARY)
-	$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) unit
+	mkdir -p $(TEST_REPORT_DIR)
+	TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/unit.xml" \
+		$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) unit
 
 test-integration: $(TEST_BINARY)
-	$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) integration
+	mkdir -p $(TEST_REPORT_DIR)
+	TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/integration.xml" \
+		$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) integration
 
 test-regression: $(TEST_BINARY)
-	$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) regression
+	mkdir -p $(TEST_REPORT_DIR)
+	TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/regression.xml" \
+		$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) regression
 
 # Attempt the app build and report GUI checks even when compilation fails.
 test-gui: $(TEST_BINARY)
+	@mkdir -p $(TEST_REPORT_DIR)
 	@set +e; \
 	$(MAKE) --no-print-directory terminator; \
 	build_status=$$?; \
 	if [ -n "$(XVFB_RUN)" ]; then \
 		if [ $$build_status -eq 0 ]; then \
-			$(XVFB_RUN) -a env TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
+			$(XVFB_RUN) -a env TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/gui.xml" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
 		else \
-			$(XVFB_RUN) -a env TERMINATOR_TEST_BUILD_FAILED=1 $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
+			$(XVFB_RUN) -a env TERMINATOR_TEST_BUILD_FAILED=1 TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/gui.xml" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
 		fi; \
 	else \
 		if [ $$build_status -eq 0 ]; then \
-			TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
+			TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/gui.xml" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
 		else \
-			TERMINATOR_TEST_BUILD_FAILED=1 $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
+			TERMINATOR_TEST_BUILD_FAILED=1 TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/gui.xml" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
 		fi; \
 	fi; \
 	gui_status=$$?; \
@@ -75,20 +83,21 @@ test-gui: $(TEST_BINARY)
 # Run every category and attempt the application build even if it fails.
 # This lets the shell tests finish and records GUI build failures in the report.
 test: $(TEST_BINARY)
+	@mkdir -p $(TEST_REPORT_DIR)
 	@set +e; \
 	$(MAKE) --no-print-directory terminator; \
 	build_status=$$?; \
 	if [ -n "$(XVFB_RUN)" ]; then \
 		if [ $$build_status -eq 0 ]; then \
-			$(XVFB_RUN) -a env TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
+			$(XVFB_RUN) -a env TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/full.xml" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
 		else \
-			$(XVFB_RUN) -a env TERMINATOR_TEST_BUILD_FAILED=1 $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
+			$(XVFB_RUN) -a env TERMINATOR_TEST_BUILD_FAILED=1 TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/full.xml" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
 		fi; \
 	else \
 		if [ $$build_status -eq 0 ]; then \
-			TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
+			TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/full.xml" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
 		else \
-			TERMINATOR_TEST_BUILD_FAILED=1 $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
+			TERMINATOR_TEST_BUILD_FAILED=1 TERMINATOR_JUNIT_REPORT="$(TEST_REPORT_DIR)/full.xml" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
 		fi; \
 	fi; \
 	test_status=$$?; \
