@@ -6,15 +6,18 @@ CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -pthread -Iinclude \
 # Libraries used by the GUI, X11 hotkey handling, and worker threads.
 LIBRARIES = -lX11 -pthread
 XVFB_RUN ?= $(shell command -v xvfb-run 2>/dev/null)
+TIMEOUT ?= timeout
+TEST_TIMEOUT ?= 180
 
 # All source files that make up the terminal application.
 SOURCES = src/main.c src/gui.c src/tab.c src/parser.c \
 	src/executor.c src/shell.c src/multiwatch.c src/history.c \
-	src/scrollback.c src/selection.c src/hotkeys.c
+	src/scrollback.c src/selection.c src/hotkeys.c src/completion.c
 
 # The test binary links the shell and utility modules without starting X11.
 TEST_SOURCES = tests/test_suite.c src/parser.c src/executor.c src/shell.c \
-	src/multiwatch.c src/history.c src/scrollback.c src/hotkeys.c
+	src/multiwatch.c src/history.c src/scrollback.c src/hotkeys.c \
+	src/completion.c
 TEST_BINARY = build/tests/test_suite
 
 # Running "make" builds the application.
@@ -24,7 +27,8 @@ all: terminator
 
 # Compile and link every source file into one executable.
 terminator: $(SOURCES) include/terminator.h include/shell.h \
-	include/scrollback.h include/selection.h include/hotkeys.h
+	include/scrollback.h include/selection.h include/hotkeys.h \
+	include/completion.h
 	$(CC) $(CFLAGS) $(SOURCES) -o terminator $(LIBRARIES)
 
 # Build the application if needed, then start it.
@@ -33,19 +37,19 @@ run: terminator
 
 # Compile the automated suite and its production modules.
 $(TEST_BINARY): $(TEST_SOURCES) include/terminator.h include/shell.h \
-	include/scrollback.h include/hotkeys.h
+	include/scrollback.h include/hotkeys.h include/completion.h
 	mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(TEST_SOURCES) -o $@ $(LIBRARIES)
 
 # Run each suite category independently.
 test-unit: $(TEST_BINARY)
-	./$(TEST_BINARY) unit
+	$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) unit
 
 test-integration: $(TEST_BINARY)
-	./$(TEST_BINARY) integration
+	$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) integration
 
 test-regression: $(TEST_BINARY)
-	./$(TEST_BINARY) regression
+	$(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) regression
 
 # Attempt the app build and report GUI checks even when compilation fails.
 test-gui: $(TEST_BINARY)
@@ -54,15 +58,15 @@ test-gui: $(TEST_BINARY)
 	build_status=$$?; \
 	if [ -n "$(XVFB_RUN)" ]; then \
 		if [ $$build_status -eq 0 ]; then \
-			$(XVFB_RUN) -a env TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" ./$(TEST_BINARY) gui; \
+			$(XVFB_RUN) -a env TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
 		else \
-			$(XVFB_RUN) -a env TERMINATOR_TEST_BUILD_FAILED=1 ./$(TEST_BINARY) gui; \
+			$(XVFB_RUN) -a env TERMINATOR_TEST_BUILD_FAILED=1 $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
 		fi; \
 	else \
 		if [ $$build_status -eq 0 ]; then \
-			TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" ./$(TEST_BINARY) gui; \
+			TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
 		else \
-			TERMINATOR_TEST_BUILD_FAILED=1 ./$(TEST_BINARY) gui; \
+			TERMINATOR_TEST_BUILD_FAILED=1 $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) gui; \
 		fi; \
 	fi; \
 	gui_status=$$?; \
@@ -76,15 +80,15 @@ test: $(TEST_BINARY)
 	build_status=$$?; \
 	if [ -n "$(XVFB_RUN)" ]; then \
 		if [ $$build_status -eq 0 ]; then \
-			$(XVFB_RUN) -a env TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" ./$(TEST_BINARY) all; \
+			$(XVFB_RUN) -a env TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
 		else \
-			$(XVFB_RUN) -a env TERMINATOR_TEST_BUILD_FAILED=1 ./$(TEST_BINARY) all; \
+			$(XVFB_RUN) -a env TERMINATOR_TEST_BUILD_FAILED=1 $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
 		fi; \
 	else \
 		if [ $$build_status -eq 0 ]; then \
-			TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" ./$(TEST_BINARY) all; \
+			TERMINATOR_TEST_BINARY="$(CURDIR)/terminator" $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
 		else \
-			TERMINATOR_TEST_BUILD_FAILED=1 ./$(TEST_BINARY) all; \
+			TERMINATOR_TEST_BUILD_FAILED=1 $(TIMEOUT) --kill-after=5s $(TEST_TIMEOUT)s ./$(TEST_BINARY) all; \
 		fi; \
 	fi; \
 	test_status=$$?; \

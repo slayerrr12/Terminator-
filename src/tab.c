@@ -186,6 +186,9 @@ void app_close_tab(App *app, size_t tab_index) {
     close(tab->worker_to_gui_fd);
   if (tab->status_from_worker_fd >= 0)
     close(tab->status_from_worker_fd);
+  for (size_t i = 0; i < tab->completion_match_count; i++)
+    free(tab->completion_matches[i]);
+  free(tab->completion_matches);
   scrollback_destroy(&tab->scrollback);
   if (tab->foreground)
     munmap(tab->foreground, sizeof(*tab->foreground));

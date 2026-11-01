@@ -25,6 +25,7 @@ static const char *action_names[HOTKEY_COUNT] = {
     [HOTKEY_INTERRUPT] = "interrupt",
     [HOTKEY_SUSPEND] = "suspend",
     [HOTKEY_NEW_TAB] = "new_tab",
+    [HOTKEY_SEARCH_HISTORY] = "search_history",
 };
 
 static const unsigned int relevant_modifiers =
@@ -53,6 +54,7 @@ void hotkeys_set_defaults(HotkeyConfig *config) {
   config->bindings[HOTKEY_INTERRUPT] = binding(XK_c, ControlMask);
   config->bindings[HOTKEY_SUSPEND] = binding(XK_z, ControlMask);
   config->bindings[HOTKEY_NEW_TAB] = binding(XK_t, ControlMask);
+  config->bindings[HOTKEY_SEARCH_HISTORY] = binding(XK_r, ControlMask);
 }
 
 static char *trim(char *text) {

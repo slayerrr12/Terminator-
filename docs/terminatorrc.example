@@ -19,3 +19,4 @@ paste = Ctrl+Shift+V
 interrupt = Ctrl+C
 suspend = Ctrl+Z
 new_tab = Ctrl+T
+search_history = Ctrl+R

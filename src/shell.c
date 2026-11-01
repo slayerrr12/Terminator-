@@ -1,5 +1,6 @@
 #include "shell.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,15 +100,91 @@ static int builtin_clear(ShellContext *shell, char **arguments, int output_fd) {
 static int builtin_history(ShellContext *shell, char **arguments,
                            int output_fd) {
   (void)arguments;
-  char (*items)[TERM_LINE_MAX] = calloc(TERM_HISTORY_CAP, sizeof(*items));
+  char (*items)[TERM_LINE_MAX] = calloc(TERM_HISTORY_DISPLAY, sizeof(*items));
   if (!items)
     return 1;
   size_t history_count =
-      history_snapshot(shell->history, items, TERM_HISTORY_CAP);
+      history_snapshot(shell->history, items, TERM_HISTORY_DISPLAY);
   for (size_t history_index = 0; history_index < history_count; ++history_index)
     dprintf(output_fd, "%zu  %s\n", history_index + 1, items[history_index]);
   free(items);
   return 0;
+}
+
+static int copy_file_to_output(int input_fd, int output_fd) {
+  char buffer[8192];
+  for (;;) {
+    ssize_t count = read(input_fd, buffer, sizeof(buffer));
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count < 0)
+      return -1;
+    if (!count)
+      return 0;
+
+    size_t written = 0;
+    while (written < (size_t)count) {
+      ssize_t result = write(output_fd, buffer + written,
+                             (size_t)count - written);
+      if (result < 0 && errno == EINTR)
+        continue;
+      if (result <= 0)
+        return -1;
+      written += (size_t)result;
+    }
+  }
+}
+
+/* This simple pager uses the app's scrollback instead of terminal screen modes. */
+static int builtin_less(ShellContext *shell, char **arguments,
+                        int output_fd) {
+  size_t file_count = 0;
+  while (arguments[file_count + 1])
+    file_count++;
+  if (file_count && !strcmp(arguments[1], "--help")) {
+    dprintf(output_fd, "Usage: less [FILE ...]\n"
+                       "Displays files in Terminator scrollback; use PageUp, "
+                       "PageDown, or the mouse wheel to scroll.\n");
+    return 0;
+  }
+
+  if (!file_count)
+    return copy_file_to_output(STDIN_FILENO, output_fd) < 0 ? 1 : 0;
+
+  int status = 0;
+  for (size_t i = 0; i < file_count; i++) {
+    int input_fd;
+    int close_input = 0;
+    if (!strcmp(arguments[i + 1], "-")) {
+      input_fd = STDIN_FILENO;
+    } else {
+      char *path = shell_path_from_working_directory(
+          shell->working_directory, arguments[i + 1]);
+      input_fd = path ? open(path, O_RDONLY) : -1;
+      if (input_fd < 0) {
+        int error_number = errno;
+        dprintf(output_fd, "less: %s: %s\n", arguments[i + 1],
+                strerror(error_number));
+        free(path);
+        status = 1;
+        continue;
+      }
+      close_input = 1;
+      free(path);
+    }
+
+    if (file_count > 1 && strcmp(arguments[i + 1], "-"))
+      dprintf(output_fd, "==> %s <==\n", arguments[i + 1]);
+    if (copy_file_to_output(input_fd, output_fd) < 0) {
+      int error_number = errno;
+      dprintf(output_fd, "less: %s: %s\n", arguments[i + 1],
+              strerror(error_number));
+      status = 1;
+    }
+    if (close_input)
+      close(input_fd);
+  }
+  return status;
 }
 
 static int builtin_source(ShellContext *shell, char **arguments,
@@ -183,7 +260,7 @@ static const BuiltinEntry builtins[] = {
     {"exit", builtin_exit},     {"history", builtin_history},
     {"jobs", builtin_jobs},     {"fg", builtin_fg},
     {"bg", builtin_bg},         {"multiWatch", shell_builtin_multiwatch},
-    {"source", builtin_source},
+    {"source", builtin_source}, {"less", builtin_less},
 };
 
 int shell_builtin(ShellContext *shell, char **arguments, int output_fd) {
@@ -234,7 +311,8 @@ void worker_run(int input_fd, int output_fd, int status_fd,
       }
       int status = shell.last_status;
       if (command_length) {
-        history_add(history, command_buffer);
+        if (history_add(history, command_buffer) < 0)
+          dprintf(output_fd, "terminator: history: %s\n", strerror(errno));
         status = shell_run_line(&shell, command_buffer, output_fd);
       }
       command_length = 0;

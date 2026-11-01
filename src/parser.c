@@ -118,7 +118,8 @@ int shell_lex(const char *text, Tokens *tokens, char **error)
   while (*position)
   {
     /* Match the whitespace rules used by the original lexer. */
-    while (*position == ' ' || *position == '\t' || *position == '\n')
+    while (*position == ' ' || *position == '\t' || *position == '\n' ||
+           *position == '\r')
       position++;
 
     if (!*position)

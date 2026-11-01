@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "completion.h"
 #include "hotkeys.h"
 #include "selection.h"
 #include "terminator.h"
@@ -165,19 +166,30 @@ static void draw_terminal_window(App *app) {
     /* Append the live prompt to the current row, like a shell prompt. */
     if (prompt_visible && row + 1 == total) {
       char prompt[sizeof(tab->working_directory) + 256];
-      if (tab->multiline_length)
+      const char *input = tab->input_buffer;
+      size_t input_length = tab->input_length;
+      size_t input_cursor = tab->input_cursor;
+      if (tab->history_search_active) {
+        strcpy(prompt, "Enter search term: ");
+        input = tab->history_search_buffer;
+        input_length = tab->history_search_length;
+        input_cursor = input_length;
+      } else if (tab->completion_waiting) {
+        strcpy(prompt, "Select file number: ");
+        input = tab->completion_choice;
+        input_length = tab->completion_choice_length;
+        input_cursor = input_length;
+      } else if (tab->multiline_length)
         strcpy(prompt, "> ");
       else
         build_shell_prompt(tab, prompt, sizeof(prompt));
       XDrawString(dpy, win, gc, line_x, y, prompt, (int)strlen(prompt));
       int px = line_x + (font ? XTextWidth(font, prompt, (int)strlen(prompt))
                               : (int)strlen(prompt) * 8);
-      XDrawString(dpy, win, gc, px, y, tab->input_buffer,
-                  (int)tab->input_length);
+      XDrawString(dpy, win, gc, px, y, input, (int)input_length);
       if (tab->scrollback.follows_output) {
-        int cx = px + (font ? XTextWidth(font, tab->input_buffer,
-                                         (int)tab->input_cursor)
-                            : (int)tab->input_cursor * 8);
+        int cx = px + (font ? XTextWidth(font, input, (int)input_cursor)
+                            : (int)input_cursor * 8);
         XDrawLine(dpy, win, gc, cx, y - (font ? font->ascent : 10), cx,
                   y + (font ? font->descent : 3));
       }
@@ -186,15 +198,13 @@ static void draw_terminal_window(App *app) {
   XFlush(dpy);
 }
 static void insert_input_text(Tab *tab, const char *text, size_t n) {
-  if (n > TERM_LINE_MAX - 1 - tab->input_length)
-    n = TERM_LINE_MAX - 1 - tab->input_length;
-  memmove(tab->input_buffer + tab->input_cursor + n,
-          tab->input_buffer + tab->input_cursor,
-          tab->input_length - tab->input_cursor);
-  memcpy(tab->input_buffer + tab->input_cursor, text, n);
-  tab->input_length += n;
-  tab->input_cursor += n;
-  tab->input_buffer[tab->input_length] = 0;
+  char copy[TERM_LINE_MAX];
+  if (n >= sizeof(copy))
+    n = sizeof(copy) - 1;
+  memcpy(copy, text, n);
+  copy[n] = '\0';
+  (void)completion_insert_text(tab->input_buffer, sizeof(tab->input_buffer),
+                               &tab->input_length, &tab->input_cursor, copy);
 }
 
 static void set_input_text(Tab *tab, const char *text) {
@@ -312,6 +322,171 @@ static void submit_input(App *app, Tab *tab) {
   tab->history_position = 0;
   (void)app;
 }
+
+static void forget_completion(Tab *tab) {
+  for (size_t i = 0; i < tab->completion_match_count; i++)
+    free(tab->completion_matches[i]);
+  free(tab->completion_matches);
+  tab->completion_matches = NULL;
+  tab->completion_match_count = 0;
+  tab->completion_waiting = 0;
+  tab->completion_choice_length = 0;
+  tab->completion_choice[0] = '\0';
+}
+
+static void start_completion(Tab *tab) {
+  CompletionResult result;
+  char *prefix = NULL;
+  if (completion_find(tab->input_buffer, tab->input_cursor,
+                      tab->working_directory, &result, &prefix) < 0) {
+    free(prefix);
+    completion_free(&result);
+    return;
+  }
+  if (!result.count) {
+    free(prefix);
+    completion_free(&result);
+    return;
+  }
+
+  char *common = completion_common_prefix(result.items, result.count);
+  if (!common) {
+    free(prefix);
+    completion_free(&result);
+    return;
+  }
+  size_t prefix_length = strlen(prefix);
+  if (strncmp(common, prefix, prefix_length)) {
+    free(common);
+    free(prefix);
+    completion_free(&result);
+    return;
+  }
+  char *suffix = completion_encode_suffix(common + prefix_length, result.quote);
+  if (suffix) {
+    insert_input_text(tab, suffix, strlen(suffix));
+    free(suffix);
+  }
+
+  if (result.count > 1) {
+    tab->completion_matches = result.items;
+    tab->completion_match_count = result.count;
+    result.items = NULL;
+    result.count = 0;
+    tab->completion_waiting = 1;
+    tab->completion_insert_cursor = tab->input_cursor;
+    tab->completion_prefix_length = strlen(common);
+    tab->completion_quote = result.quote;
+    tab->completion_choice_length = 0;
+    tab->completion_choice[0] = '\0';
+
+    append_output_text(tab, "Possible completions:\n", 22);
+    for (size_t i = 0; i < tab->completion_match_count; i++) {
+      char line[TERM_PATH_BUFFER + 64];
+      int length = snprintf(line, sizeof(line), "  %zu) %s\n", i + 1,
+                            tab->completion_matches[i]);
+      if (length > 0) {
+        size_t text_length = (size_t)length;
+        if (text_length >= sizeof(line))
+          text_length = sizeof(line) - 1;
+        append_output_text(tab, line, text_length);
+      }
+    }
+  }
+  free(common);
+  free(prefix);
+  completion_free(&result);
+}
+
+static void choose_completion(Tab *tab) {
+  if (!tab->completion_choice_length)
+    return;
+  char *end = NULL;
+  unsigned long choice = strtoul(tab->completion_choice, &end, 10);
+  if (!end || *end || choice == 0 || choice > tab->completion_match_count)
+    return;
+
+  tab->input_cursor = tab->completion_insert_cursor;
+  (void)completion_select(tab->input_buffer, sizeof(tab->input_buffer),
+                          &tab->input_length, &tab->input_cursor,
+                          tab->completion_matches,
+                          tab->completion_match_count, (size_t)choice,
+                          tab->completion_prefix_length,
+                          tab->completion_quote);
+  forget_completion(tab);
+}
+
+static void print_history_match(const char *command, void *context) {
+  Tab *tab = context;
+  append_output_text(tab, command, strlen(command));
+  append_output_text(tab, "\n", 1);
+}
+
+static void handle_modal_key(App *app, Tab *tab, KeySym key_symbol,
+                             HotkeyAction action, const char *text,
+                             int text_length) {
+  char *buffer;
+  size_t *length;
+  size_t capacity;
+  if (tab->history_search_active) {
+    buffer = tab->history_search_buffer;
+    length = &tab->history_search_length;
+    capacity = sizeof(tab->history_search_buffer);
+  } else {
+    buffer = tab->completion_choice;
+    length = &tab->completion_choice_length;
+    capacity = sizeof(tab->completion_choice);
+  }
+
+  if (key_symbol == XK_Escape || action == HOTKEY_INTERRUPT) {
+    tab->history_search_active = 0;
+    tab->history_search_length = 0;
+    tab->history_search_buffer[0] = '\0';
+    forget_completion(tab);
+    return;
+  }
+  if (key_symbol == XK_BackSpace) {
+    if (*length)
+      buffer[--(*length)] = '\0';
+    return;
+  }
+  if (action == HOTKEY_DELETE_TO_START) {
+    *length = 0;
+    buffer[0] = '\0';
+    return;
+  }
+  if (key_symbol == XK_Return || key_symbol == XK_KP_Enter) {
+    if (tab->history_search_active) {
+      size_t best_match = 0;
+      int matches = history_search(app->history, tab->history_search_buffer,
+                                   print_history_match, tab, &best_match);
+      if (!matches)
+        append_output_text(tab, "No match for search term in history\n", 36);
+      else if (matches < 0)
+        append_output_text(tab, "terminator: history search failed\n", 34);
+      tab->history_search_active = 0;
+      tab->history_search_length = 0;
+      tab->history_search_buffer[0] = '\0';
+    } else {
+      choose_completion(tab);
+    }
+    return;
+  }
+  if (tab->completion_waiting && key_symbol == XK_Tab)
+    return;
+  if (text_length > 0 && !(action != HOTKEY_NONE) && *length + (size_t)text_length < capacity) {
+    for (int i = 0; i < text_length; i++) {
+      if (tab->completion_waiting && !isdigit((unsigned char)text[i]))
+        return;
+      if (!tab->completion_waiting && iscntrl((unsigned char)text[i]))
+        return;
+    }
+    memcpy(buffer + *length, text, (size_t)text_length);
+    *length += (size_t)text_length;
+    buffer[*length] = '\0';
+  }
+}
+
 static void handle_key_press(App *app, XKeyEvent *key_event) {
   /* Apply configured editing and control shortcuts to the selected tab. */
   Tab *tab = &app->tabs[app->active_tab];
@@ -321,6 +496,10 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
   int n = XLookupString(key_event, buf, sizeof(buf), &key_symbol, NULL);
   HotkeyAction action =
       hotkeys_find_action(&hotkey_config, base_key, key_event->state);
+  if (tab->history_search_active || tab->completion_waiting) {
+    handle_modal_key(app, tab, key_symbol, action, buf, n);
+    return;
+  }
   switch (action) {
   case HOTKEY_MOVE_LEFT:
     if (tab->input_cursor)
@@ -384,12 +563,24 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
     if (app_add_tab(app) < 0)
       append_output_text(tab, "terminator: maximum tabs reached\n", 34);
     return;
+  case HOTKEY_SEARCH_HISTORY:
+    if (!tab->multiline_length) {
+      tab->history_search_active = 1;
+      tab->history_search_length = 0;
+      tab->history_search_buffer[0] = '\0';
+    }
+    return;
   case HOTKEY_NONE:
   case HOTKEY_COUNT:
     break;
   }
   if (key_symbol == XK_Return || key_symbol == XK_KP_Enter) {
     submit_input(app, tab);
+    return;
+  }
+  if (key_symbol == XK_Tab) {
+    if (!tab->command_is_running)
+      start_completion(tab);
     return;
   }
   if (key_symbol == XK_BackSpace && tab->input_cursor) {

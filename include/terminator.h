@@ -9,7 +9,8 @@
 #include <sys/types.h>
 
 #define TERM_MAX_TABS 16
-#define TERM_HISTORY_CAP 1024
+#define TERM_HISTORY_CAP 10000
+#define TERM_HISTORY_DISPLAY 1000
 #define TERM_LINE_MAX 8192
 #define TERM_CWD_MAX 1024
 #define TERM_PATH_BUFFER 4096
@@ -28,9 +29,9 @@ extern volatile sig_atomic_t terminator_stopping;
 
 typedef struct {
   sem_t semaphore;
+  char file_path[TERM_PATH_BUFFER];
   size_t entry_count;
-  size_t next_entry;
-  char entries[TERM_HISTORY_CAP][TERM_LINE_MAX];
+  off_t file_size;
 } SharedHistory;
 
 typedef enum { MODE_THREADS, MODE_PROCESSES } ExecutionMode;
@@ -65,6 +66,19 @@ typedef struct {
   char multiline_buffer[TERM_LINE_MAX];
   size_t multiline_length;
 
+  int history_search_active;
+  char history_search_buffer[TERM_LINE_MAX];
+  size_t history_search_length;
+
+  int completion_waiting;
+  char **completion_matches;
+  size_t completion_match_count;
+  size_t completion_insert_cursor;
+  size_t completion_prefix_length;
+  char completion_quote;
+  char completion_choice[16];
+  size_t completion_choice_length;
+
   Scrollback scrollback;
 } Tab;
 
@@ -78,11 +92,15 @@ typedef struct {
 } App;
 
 int history_init(SharedHistory *history, int process_shared);
-void history_add(SharedHistory *history, const char *line);
+int history_add(SharedHistory *history, const char *line);
 size_t history_snapshot(SharedHistory *history, char (*snapshot)[TERM_LINE_MAX],
                         size_t max_entries);
 int history_get_recent(SharedHistory *history, size_t offset_from_newest,
                        char *buffer, size_t buffer_size);
+typedef void (*HistorySearchCallback)(const char *command, void *context);
+int history_search(SharedHistory *history, const char *term,
+                   HistorySearchCallback callback, void *context,
+                   size_t *best_match_length);
 int app_add_tab(App *app);
 void app_close_tab(App *app, size_t tab_index);
 void app_shutdown(App *app);
