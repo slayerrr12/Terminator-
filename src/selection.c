@@ -12,6 +12,8 @@ typedef struct {
 } TextSelection;
 
 static TextSelection selection;
+static char **display_lines;
+static size_t display_line_count;
 static Atom clipboard_atom, utf8_atom, targets_atom, text_atom;
 static Atom clipboard_property, paste_selection;
 static int paste_pending, paste_tried_string;
@@ -29,6 +31,25 @@ void selection_init(Display *display) {
 void selection_clear(void) {
   selection.active = 0;
   selection.dragging = 0;
+}
+
+static void remember_display_line(size_t row, const char *text) {
+  if (row >= display_line_count)
+    return;
+  size_t length = strlen(text);
+  char *copy = realloc(display_lines[row], length + 1);
+  if (!copy)
+    return;
+  memcpy(copy, text, length + 1);
+  display_lines[row] = copy;
+}
+
+void selection_begin_frame(size_t rows) {
+  for (size_t row = 0; row < display_line_count; row++)
+    free(display_lines[row]);
+  free(display_lines);
+  display_lines = calloc(rows, sizeof(*display_lines));
+  display_line_count = display_lines ? rows : 0;
 }
 
 void selection_tab_closed(size_t tab_index) {
@@ -93,6 +114,7 @@ static int text_width(XFontStruct *font, const char *text, size_t length) {
 void selection_draw_line(Display *display, Window window, GC graphics,
                          XFontStruct *font, size_t line_number,
                          const char *line, int x, int baseline) {
+  remember_display_line(line_number, line);
   size_t length = strlen(line), first = 0, last = 0;
   if (!selected_columns(line_number, length, &first, &last)) {
     XDrawString(display, window, graphics, x, baseline, line, (int)length);
@@ -117,25 +139,24 @@ void selection_draw_line(Display *display, Window window, GC graphics,
               line + last, (int)(length - last));
 }
 
-static int mouse_text_position(App *app, int x, int y, size_t visible_rows,
+static int mouse_text_position(int x, int y, size_t visible_rows,
                                int line_height, XFontStruct *font,
                                size_t *line_number, size_t *column) {
-  Tab *tab = &app->tabs[app->active_tab];
   /* draw_terminal_window passes 54 as the text baseline, not its top edge. */
   int text_top = 54 - (font ? font->ascent : 12);
-  if (y < text_top || !tab->scrollback.line_count)
+  if (y < text_top || !display_line_count)
     return 0;
 
   size_t row = (size_t)((y - text_top) / line_height);
-  size_t line = scrollback_first_visible(&tab->scrollback, visible_rows) + row;
-  if (line >= tab->scrollback.line_count)
+  if (row >= visible_rows || row >= display_line_count ||
+      !display_lines[row])
     return 0;
 
-  const char *text = scrollback_get_line(&tab->scrollback, line);
+  const char *text = display_lines[row];
   int character_width = font ? font->max_bounds.width : 8;
   if (character_width < 1)
     character_width = 8;
-  *line_number = line;
+  *line_number = row;
   *column = x <= 12 ? 0 : (size_t)(x - 12 + character_width / 2) /
                               (size_t)character_width;
   size_t length = strlen(text);
@@ -148,7 +169,7 @@ void selection_mouse_down(App *app, int x, int y, size_t visible_rows,
                           int line_height, XFontStruct *font) {
   size_t line, column;
   selection_clear();
-  if (!mouse_text_position(app, x, y, visible_rows, line_height, font, &line,
+  if (!mouse_text_position(x, y, visible_rows, line_height, font, &line,
                            &column))
     return;
 
@@ -158,11 +179,11 @@ void selection_mouse_down(App *app, int x, int y, size_t visible_rows,
   selection.start_column = selection.end_column = column;
 }
 
-static void update_selection(App *app, int x, int y, size_t visible_rows,
+static void update_selection(int x, int y, size_t visible_rows,
                              int line_height, XFontStruct *font) {
   size_t line, column;
   if (!selection.dragging ||
-      !mouse_text_position(app, x, y, visible_rows, line_height, font, &line,
+      !mouse_text_position(x, y, visible_rows, line_height, font, &line,
                            &column))
     return;
 
@@ -175,17 +196,18 @@ static void update_selection(App *app, int x, int y, size_t visible_rows,
 
 void selection_mouse_move(App *app, int x, int y, size_t visible_rows,
                           int line_height, XFontStruct *font) {
-  update_selection(app, x, y, visible_rows, line_height, font);
+  (void)app;
+  update_selection(x, y, visible_rows, line_height, font);
 }
 
 void selection_mouse_up(App *app, int x, int y, size_t visible_rows,
                         int line_height, XFontStruct *font) {
-  update_selection(app, x, y, visible_rows, line_height, font);
+  (void)app;
+  update_selection(x, y, visible_rows, line_height, font);
   selection.dragging = 0;
 }
 
-static char *copy_selected_text(const Scrollback *scrollback,
-                                size_t *copied_length) {
+static char *copy_selected_text(size_t *copied_length) {
   if (!selection.active)
     return NULL;
 
@@ -198,9 +220,11 @@ static char *copy_selected_text(const Scrollback *scrollback,
 
   size_t used = 0;
   for (size_t line_number = first_line;
-       line_number <= last_line && line_number < scrollback->line_count;
+       line_number <= last_line && line_number < display_line_count;
        line_number++) {
-    const char *line = scrollback_get_line(scrollback, line_number);
+    const char *line = display_lines[line_number];
+    if (!line)
+      continue;
     size_t length = strlen(line);
     size_t start = line_number == first_line ? first_column : 0;
     size_t end = line_number == last_line ? last_column : length;
@@ -225,8 +249,7 @@ void selection_copy_to_clipboard(App *app, Display *display, Window window) {
     return;
 
   size_t length;
-  char *text = copy_selected_text(&app->tabs[selection.tab_index].scrollback,
-                                  &length);
+  char *text = copy_selected_text(&length);
   if (!text || !length) {
     free(text);
     return;
@@ -336,6 +359,11 @@ size_t selection_handle_event(Display *display, Window window, XEvent *event,
 }
 
 void selection_destroy(void) {
+  for (size_t row = 0; row < display_line_count; row++)
+    free(display_lines[row]);
+  free(display_lines);
+  display_lines = NULL;
+  display_line_count = 0;
   free(clipboard_text);
   clipboard_text = NULL;
 }

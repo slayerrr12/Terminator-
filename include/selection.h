@@ -9,6 +9,7 @@
 void selection_init(Display *display);
 void selection_clear(void);
 void selection_tab_closed(size_t tab_index);
+void selection_begin_frame(size_t visible_rows);
 void selection_draw_line(Display *display, Window window, GC graphics,
                          XFontStruct *font, size_t line_number,
                          const char *line, int x, int baseline);

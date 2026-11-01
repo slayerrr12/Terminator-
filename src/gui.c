@@ -151,24 +151,20 @@ static void draw_terminal_window(App *app) {
   size_t total = tab->scrollback.line_count;
   if (prompt_visible && total == 0)
     total = 1;
-  size_t first =
-      scrollback_first_visible(&tab->scrollback, visible);
+  size_t first = scrollback_first_visible(&tab->scrollback, visible);
+  selection_begin_frame(visible);
   int y = top;
   for (size_t row = first; row < total && y < height - 5; row++, y += lineh) {
-    const char *line = scrollback_get_line(&tab->scrollback, row);
-    int line_x = 12;
-    if (line[0]) {
-      selection_draw_line(dpy, win, gc, font, row, line, line_x, y);
-      line_x += font ? XTextWidth(font, line, (int)strlen(line))
-                     : (int)strlen(line) * 8;
-    }
+    const char *output = scrollback_get_line(&tab->scrollback, row);
+    size_t output_length = strlen(output);
+    const char *prompt_text = NULL;
+    char prompt[sizeof(tab->working_directory) + 256];
+    const char *input = "";
+    size_t input_length = 0;
+    size_t input_cursor = 0;
 
-    /* Append the live prompt to the current row, like a shell prompt. */
+    /* Combine the visible text so mouse selection includes prompt and input. */
     if (prompt_visible && row + 1 == total) {
-      char prompt[sizeof(tab->working_directory) + 256];
-      const char *input = tab->input_buffer;
-      size_t input_length = tab->input_length;
-      size_t input_cursor = tab->input_cursor;
       if (tab->history_search_active) {
         strcpy(prompt, "Enter search term: ");
         input = tab->history_search_buffer;
@@ -179,21 +175,43 @@ static void draw_terminal_window(App *app) {
         input = tab->completion_choice;
         input_length = tab->completion_choice_length;
         input_cursor = input_length;
-      } else if (tab->multiline_length)
+      } else if (tab->multiline_length) {
         strcpy(prompt, "> ");
-      else
+      } else {
         build_shell_prompt(tab, prompt, sizeof(prompt));
-      XDrawString(dpy, win, gc, line_x, y, prompt, (int)strlen(prompt));
-      int px = line_x + (font ? XTextWidth(font, prompt, (int)strlen(prompt))
-                              : (int)strlen(prompt) * 8);
-      XDrawString(dpy, win, gc, px, y, input, (int)input_length);
-      if (tab->scrollback.follows_output) {
-        int cx = px + (font ? XTextWidth(font, input, (int)input_cursor)
-                            : (int)input_cursor * 8);
-        XDrawLine(dpy, win, gc, cx, y - (font ? font->ascent : 10), cx,
-                  y + (font ? font->descent : 3));
+        input = tab->input_buffer;
+        input_length = tab->input_length;
+        input_cursor = tab->input_cursor;
       }
+      prompt_text = prompt;
     }
+
+    size_t prompt_length = prompt_text ? strlen(prompt_text) : 0;
+    size_t display_length = output_length + prompt_length + input_length;
+    char *display_line = malloc(display_length + 1);
+    if (!display_line)
+      continue;
+    memcpy(display_line, output, output_length);
+    if (prompt_text) {
+      memcpy(display_line + output_length, prompt_text, prompt_length);
+      memcpy(display_line + output_length + prompt_length, input, input_length);
+    }
+    display_line[display_length] = '\0';
+    selection_draw_line(dpy, win, gc, font, row - first, display_line, 12, y);
+
+    if (prompt_text && tab->scrollback.follows_output) {
+      int output_width = font ? XTextWidth(font, output, (int)output_length)
+                              : (int)output_length * 8;
+      int prompt_width = font ? XTextWidth(font, prompt_text,
+                                           (int)prompt_length)
+                              : (int)prompt_length * 8;
+      int input_width = font ? XTextWidth(font, input, (int)input_cursor)
+                             : (int)input_cursor * 8;
+      int cursor_x = 12 + output_width + prompt_width + input_width;
+      XDrawLine(dpy, win, gc, cursor_x, y - (font ? font->ascent : 10),
+                cursor_x, y + (font ? font->descent : 3));
+    }
+    free(display_line);
   }
   XFlush(dpy);
 }
