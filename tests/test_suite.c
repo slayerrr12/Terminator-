@@ -2845,6 +2845,99 @@ static void wait_milliseconds(long milliseconds) {
   nanosleep(&pause, NULL);
 }
 
+/* Find a line by its rendered pixels so GUI tests check what users can see. */
+static int gui_find_text_line(Display *display, Window window,
+                              const char *expected_text,
+                              int after_baseline) {
+  XFontStruct *font = XLoadQueryFont(display, "9x15");
+  if (!font)
+    font = XLoadQueryFont(display, "fixed");
+  if (!font)
+    return -1;
+
+  XWindowAttributes attributes;
+  if (!XGetWindowAttributes(display, window, &attributes)) {
+    XFreeFont(display, font);
+    return -1;
+  }
+
+  int text_width = XTextWidth(font, expected_text, (int)strlen(expected_text));
+  int text_height = font->ascent + font->descent;
+  if (text_width <= 0 || text_height <= 0 ||
+      attributes.width < text_width + 12) {
+    XFreeFont(display, font);
+    return -1;
+  }
+  XImage *background_image =
+      XGetImage(display, window, 0, 54, 1, 1, AllPlanes, ZPixmap);
+  if (!background_image) {
+    XFreeFont(display, font);
+    return -1;
+  }
+  unsigned long background_pixel = XGetPixel(background_image, 0, 0);
+  XDestroyImage(background_image);
+
+  Pixmap expected = XCreatePixmap(display, window, (unsigned)text_width,
+                                  (unsigned)text_height,
+                                  (unsigned)attributes.depth);
+  GC graphics = XCreateGC(display, expected, 0, NULL);
+  XSetForeground(display, graphics, 0);
+  XFillRectangle(display, expected, graphics, 0, 0, (unsigned)text_width,
+                 (unsigned)text_height);
+  XSetForeground(display, graphics, 1);
+  XSetFont(display, graphics, font->fid);
+  XDrawString(display, expected, graphics, 0, font->ascent, expected_text,
+              (int)strlen(expected_text));
+  XImage *expected_image = XGetImage(display, expected, 0, 0,
+                                     (unsigned)text_width,
+                                     (unsigned)text_height, AllPlanes, ZPixmap);
+  int result = -1;
+  int line_height = text_height + 3;
+  for (int baseline = 54;
+       expected_image &&
+       baseline + font->descent < attributes.height - 5;
+       baseline += line_height) {
+    if (baseline <= after_baseline)
+      continue;
+    XImage *actual_image = XGetImage(
+        display, window, 12, baseline - font->ascent, (unsigned)text_width,
+        (unsigned)text_height, AllPlanes, ZPixmap);
+    if (!actual_image)
+      continue;
+
+    int matches = 1;
+    for (int row = 0; row < text_height && matches; row++)
+      for (int column = 0; column < text_width; column++)
+        if ((XGetPixel(actual_image, column, row) !=
+             background_pixel) !=
+            (XGetPixel(expected_image, column, row) != 0)) {
+          matches = 0;
+          break;
+        }
+    XDestroyImage(actual_image);
+    if (matches) {
+      result = baseline;
+      break;
+    }
+  }
+
+  if (expected_image)
+    XDestroyImage(expected_image);
+  XFreeGC(display, graphics);
+  XFreePixmap(display, expected);
+  XFreeFont(display, font);
+  return result;
+}
+
+static int gui_lines_are_ordered(Display *display, Window window,
+                                 const char *first_text,
+                                 const char *second_text) {
+  int first_line = gui_find_text_line(display, window, first_text, -1);
+  int second_line =
+      gui_find_text_line(display, window, second_text, first_line);
+  return first_line >= 0 && second_line > first_line;
+}
+
 static int run_gui_feature_test(const char *mode_argument,
                                 const char *mode_name, int *completion_ok_out,
                                 int *search_ok_out) {
@@ -2857,6 +2950,12 @@ static int run_gui_feature_test(const char *mode_argument,
   char second_choice[TERM_PATH_BUFFER];
   char third_choice[TERM_PATH_BUFFER];
   char history_path[TERM_PATH_BUFFER];
+  char search_marker[128];
+  const char *user = getenv("USER");
+  if (!user || !*user)
+    user = "user";
+  snprintf(search_marker, sizeof(search_marker),
+           "%s@terminator> (Ctrl+R)", user);
   join_test_path(gui_directory, sizeof(gui_directory), test_root,
                  "gui-working-directory");
   join_test_path(gui_home, sizeof(gui_home), test_root, "gui-home");
@@ -2915,6 +3014,7 @@ static int run_gui_feature_test(const char *mode_argument,
   }
 
   int result = 0;
+  int search_order_ok = 1;
   if (window == None || send_gui_text(display, window, "cd ") < 0 ||
       send_gui_text(display, window, gui_directory) < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0) {
@@ -2970,8 +3070,15 @@ static int run_gui_feature_test(const char *mode_argument,
         send_gui_text(display, window, "pick-gamma.txt") < 0 ||
         send_gui_key(display, window, XK_Return, 0) < 0)
       result = -1;
-    else
+    else {
       wait_milliseconds(200);
+      search_order_ok =
+          gui_lines_are_ordered(display, window, search_marker,
+                                "Enter search term: pick-gamma.txt") &&
+          gui_lines_are_ordered(display, window,
+                                "Enter search term: pick-gamma.txt",
+                                "cat pick-gamma.txt");
+    }
   }
   if (result == 0 &&
       (send_gui_key(display, window, XK_r, ControlMask) < 0 ||
@@ -2979,17 +3086,46 @@ static int run_gui_feature_test(const char *mode_argument,
        send_gui_key(display, window, XK_Return, 0) < 0))
     result = -1;
   wait_milliseconds(150);
+  if (result == 0)
+    search_order_ok =
+        search_order_ok &&
+        gui_lines_are_ordered(display, window, "Enter search term: pick-gama",
+                              "cat pick-gamma.txt");
   if (result == 0 &&
       (send_gui_key(display, window, XK_r, ControlMask) < 0 ||
-       send_gui_text(display, window, "no-such-history-term") < 0 ||
+       send_gui_text(display, window, "xyz") < 0 ||
        send_gui_key(display, window, XK_Return, 0) < 0))
     result = -1;
   wait_milliseconds(150);
+  if (result == 0)
+    search_order_ok =
+        search_order_ok &&
+        gui_lines_are_ordered(
+            display, window, "Enter search term: xyz",
+            "No match for search term in history");
+  if (result == 0 &&
+      (send_gui_key(display, window, XK_r, ControlMask) < 0 ||
+       send_gui_key(display, window, XK_Return, 0) < 0))
+    result = -1;
+  wait_milliseconds(150);
+  if (result == 0)
+    search_order_ok =
+        search_order_ok &&
+        gui_lines_are_ordered(display, window, "Enter search term: ",
+                              "No match for search term in history");
   if (result == 0 &&
       (send_gui_key(display, window, XK_r, ControlMask) < 0 ||
        send_gui_text(display, window, "cancel-this-search") < 0 ||
-       send_gui_key(display, window, XK_Escape, 0) < 0 ||
-       send_gui_text(display, window, "/usr/bin/printf gui-after-escape") < 0 ||
+       send_gui_key(display, window, XK_Escape, 0) < 0))
+    result = -1;
+  wait_milliseconds(100);
+  if (result == 0)
+    search_order_ok =
+        search_order_ok &&
+        gui_find_text_line(display, window,
+                           "Enter search term: cancel-this-search", -1) < 0;
+  if (result == 0 &&
+      (send_gui_text(display, window, "/usr/bin/printf gui-after-escape") < 0 ||
        send_gui_key(display, window, XK_Return, 0) < 0))
     result = -1;
   wait_milliseconds(300);
@@ -3002,14 +3138,17 @@ static int run_gui_feature_test(const char *mode_argument,
                              contains(history_text,
                                       "/usr/bin/printf gui-after-escape\n") &&
                              !contains(history_text, "pick-gama\n") &&
-                             !contains(history_text, "no-such-history-term\n") &&
+                             !contains(history_text, "xyz\n") &&
                              !contains(history_text, "cancel-this-search\n");
   if (!search_not_submitted)
     fprintf(stderr, "GUI search history mismatch (%s):\n%s\n",
             mode_name, history_text ? history_text : "<history unavailable>");
+  if (!search_order_ok)
+    fprintf(stderr, "GUI history transcript lines are missing or out of order (%s)\n",
+            mode_name);
   if (result == 0 && !search_not_submitted)
     result = -1;
-  *search_ok_out = result == 0;
+  *search_ok_out = result == 0 && search_not_submitted && search_order_ok;
   free(history_text);
 
   XCloseDisplay(display);
@@ -3159,13 +3298,14 @@ static void run_selected(const char *selection) {
                                 : "GUI completion interaction failed",
                   completion_ok,
                   "Uses XSendEvent through Xvfb; checks persisted commands.");
-      report_test("G004", "history search", "thread-mode exact/fallback/no-match and cancel paths",
-                  "Ctrl+R exact term; Ctrl+R typo; Ctrl+R missing term; Escape",
-                  "search text is not recorded as a command",
-                  search_ok ? "history unchanged by search query"
-                            : "history search interaction failed",
+      report_test("G004", "history search",
+                  "thread-mode search transcript and search results",
+                  "exact; fuzzy; xyz no-match; empty term; Escape",
+                  "prompt, search term, and result appear in order; query is not saved",
+                  search_ok ? "transcript order and history checks passed"
+                            : "transcript order or history check failed",
                   search_ok,
-                  "Exercises the GUI prompt mode and persistent history file.");
+                  "Checks rendered X11 text and persistent history.");
       result = run_gui_feature_test("useProcess=True", "gui-process-history",
                                     &completion_ok, &search_ok);
       report_test("G103", "filename completion",
@@ -3176,13 +3316,14 @@ static void run_selected(const char *selection) {
                                 : "GUI completion interaction failed",
                   completion_ok,
                   "Uses XSendEvent through Xvfb; checks persisted commands.");
-      report_test("G104", "history search", "process-mode exact/fallback/no-match and cancel paths",
-                  "Ctrl+R exact term; Ctrl+R typo; Ctrl+R missing term; Escape",
-                  "search text is not recorded as a command",
-                  search_ok ? "history unchanged by search query"
-                            : "history search interaction failed",
+      report_test("G104", "history search",
+                  "process-mode search transcript and search results",
+                  "exact; fuzzy; xyz no-match; empty term; Escape",
+                  "prompt, search term, and result appear in order; query is not saved",
+                  search_ok ? "transcript order and history checks passed"
+                            : "transcript order or history check failed",
                   search_ok,
-                  "Exercises the GUI prompt mode and persistent history file.");
+                  "Checks rendered X11 text and persistent history.");
     }
   }
 }

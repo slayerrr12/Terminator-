@@ -422,6 +422,21 @@ static void print_history_match(const char *command, void *context) {
   append_output_text(tab, "\n", 1);
 }
 
+/* Keep Ctrl+R searches in the visible transcript, but out of shell history. */
+static void append_history_search_prompt(Tab *tab) {
+  const char *user = getenv("USER");
+  if (!user || !*user)
+    user = "user";
+  char prompt[128];
+  snprintf(prompt, sizeof(prompt), "%s@terminator> (Ctrl+R)\n", user);
+  append_output_text(tab, prompt, strlen(prompt));
+  append_output_text(tab, "Enter search term: ",
+                     sizeof("Enter search term: ") - 1);
+  append_output_text(tab, tab->history_search_buffer,
+                     tab->history_search_length);
+  append_output_text(tab, "\n", 1);
+}
+
 static void handle_modal_key(App *app, Tab *tab, KeySym key_symbol,
                              HotkeyAction action, const char *text,
                              int text_length) {
@@ -458,6 +473,7 @@ static void handle_modal_key(App *app, Tab *tab, KeySym key_symbol,
   if (key_symbol == XK_Return || key_symbol == XK_KP_Enter) {
     if (tab->history_search_active) {
       size_t best_match = 0;
+      append_history_search_prompt(tab);
       int matches = history_search(app->history, tab->history_search_buffer,
                                    print_history_match, tab, &best_match);
       if (!matches)

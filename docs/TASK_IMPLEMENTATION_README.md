@@ -408,7 +408,10 @@ command containing that exact text. If there are no exact hits, it finds the
 longest common substring between the term and each command. If the best
 substring is longer than two characters, all commands tied for that longest
 match are displayed. Otherwise it prints `No match for search term in
-history`.
+history`. The scrollback transcript shows the `USER@terminator> (Ctrl+R)`
+line, then `Enter search term: <term>`, then the matches or no-match message.
+This preserves the order shown in the assignment example. Search terms are
+displayed for context but are not saved as commands.
 
 ### Where is the code for this?
 
