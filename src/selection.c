@@ -121,11 +121,12 @@ static int mouse_text_position(App *app, int x, int y, size_t visible_rows,
                                int line_height, XFontStruct *font,
                                size_t *line_number, size_t *column) {
   Tab *tab = &app->tabs[app->active_tab];
-  const int output_top = 54;
-  if (y < output_top || !tab->scrollback.line_count)
+  /* draw_terminal_window passes 54 as the text baseline, not its top edge. */
+  int text_top = 54 - (font ? font->ascent : 12);
+  if (y < text_top || !tab->scrollback.line_count)
     return 0;
 
-  size_t row = (size_t)((y - output_top) / line_height);
+  size_t row = (size_t)((y - text_top) / line_height);
   size_t line = scrollback_first_visible(&tab->scrollback, visible_rows) + row;
   if (line >= tab->scrollback.line_count)
     return 0;

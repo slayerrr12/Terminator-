@@ -3418,7 +3418,8 @@ static int send_gui_text(Display *display, Window window, const char *text) {
 }
 
 static int send_gui_mouse_selection(Display *display, Window window,
-                                    int first_x, int last_x, int y) {
+                                    int first_x, int first_y, int last_x,
+                                    int last_y) {
   XEvent event = {0};
   event.xbutton.type = ButtonPress;
   event.xbutton.display = display;
@@ -3426,7 +3427,7 @@ static int send_gui_mouse_selection(Display *display, Window window,
   event.xbutton.root = DefaultRootWindow(display);
   event.xbutton.time = CurrentTime;
   event.xbutton.x = first_x;
-  event.xbutton.y = y;
+  event.xbutton.y = first_y;
   event.xbutton.button = Button1;
   event.xbutton.same_screen = True;
   if (!XSendEvent(display, window, True, ButtonPressMask, &event))
@@ -3439,7 +3440,7 @@ static int send_gui_mouse_selection(Display *display, Window window,
   event.xmotion.root = DefaultRootWindow(display);
   event.xmotion.time = CurrentTime;
   event.xmotion.x = last_x;
-  event.xmotion.y = y;
+  event.xmotion.y = last_y;
   event.xmotion.state = Button1Mask;
   event.xmotion.same_screen = True;
   if (!XSendEvent(display, window, True, ButtonMotionMask, &event))
@@ -3452,7 +3453,7 @@ static int send_gui_mouse_selection(Display *display, Window window,
   event.xbutton.root = DefaultRootWindow(display);
   event.xbutton.time = CurrentTime;
   event.xbutton.x = last_x;
-  event.xbutton.y = y;
+  event.xbutton.y = last_y;
   event.xbutton.button = Button1;
   event.xbutton.same_screen = True;
   if (!XSendEvent(display, window, True, ButtonReleaseMask, &event))
@@ -3628,40 +3629,119 @@ static int test_gui_clipboard_copy(Display *display, Window window,
                                    Display *clipboard_display,
                                    Window clipboard_window) {
   static const char copied_text[] = "TERMINATOR_COPY_MARKER";
-  int baseline = gui_find_text_line(display, window, copied_text, -1);
+  static const char first_line[] = "COPY one: spaces&and$symbol#!";
+  static const char second_line[] = "COPY two: x[y]{z}+";
+  static const char multiline_text[] =
+      "COPY one: spaces&and$symbol#!\nCOPY two: x[y]{z}+";
+  int marker_y = gui_find_text_line(display, window, copied_text, -1);
+  int first_y = gui_find_text_line(display, window, first_line, -1);
+  int second_y = gui_find_text_line(display, window, second_line, -1);
   XFontStruct *font = XLoadQueryFont(display, "9x15");
   if (!font)
     font = XLoadQueryFont(display, "fixed");
   int result = -1;
-  if (baseline < 0)
-    fprintf(stderr, "clipboard test: output marker was not rendered\n");
-  if (baseline >= 0 && font) {
-    int right_x = 12 + XTextWidth(font, copied_text, (int)strlen(copied_text));
-    int selected = send_gui_mouse_selection(display, window, 12, right_x,
-                                            baseline) == 0;
-    int copied = selected && send_gui_key(display, window, XK_c,
-                                          ControlMask | ShiftMask) == 0;
-    if (!selected)
-      fprintf(stderr, "clipboard test: mouse selection event failed\n");
-    else if (!copied)
-      fprintf(stderr, "clipboard test: Ctrl+Shift+C event failed\n");
-    else {
-      char clipboard_text[128];
-      int read_ok = read_gui_clipboard(clipboard_display, clipboard_window,
-                                       clipboard_text,
-                                       sizeof(clipboard_text)) == 0;
-      if (read_ok && !strcmp(clipboard_text, copied_text)) {
-        result = 0;
-      } else {
-        fprintf(stderr, "clipboard test: copied value was %s%s\n",
-                read_ok ? "" : "unavailable; expected ",
-                read_ok ? clipboard_text : copied_text);
-      }
-    }
-  } else if (!font)
+  if (!font) {
     fprintf(stderr, "clipboard test: test font could not be loaded\n");
-  if (font)
+    return -1;
+  }
+  if (marker_y < 0 || first_y < 0 || second_y < 0) {
+    fprintf(stderr, "clipboard test: expected copy text was not rendered\n");
     XFreeFont(display, font);
+    return -1;
+  }
+
+  char clipboard_text[256];
+  int marker_right = 12 + XTextWidth(font, copied_text,
+                                     (int)strlen(copied_text));
+  int marker_text_y = marker_y - font->ascent / 2;
+  int marker_selected =
+      send_gui_mouse_selection(display, window, 12, marker_text_y, marker_right,
+                               marker_text_y) == 0;
+  int copied_marker = marker_selected &&
+      send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
+      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
+                         sizeof(clipboard_text)) == 0 &&
+      !strcmp(clipboard_text, copied_text);
+  XSync(display, False);
+  XImage *selection_image =
+      copied_marker
+          ? XGetImage(display, window, 12, marker_y - font->ascent,
+                      (unsigned)(marker_right - 12),
+                      (unsigned)(font->ascent + font->descent), AllPlanes,
+                      ZPixmap)
+          : NULL;
+  int visibly_selected = 0;
+  if (selection_image) {
+    for (int y = 0; y < selection_image->height && !visibly_selected; y++)
+      for (int x = 0; x < selection_image->width; x++)
+        if (XGetPixel(selection_image, x, y) == 0x85a8d0) {
+          visibly_selected = 1;
+          break;
+        }
+    XDestroyImage(selection_image);
+  }
+
+  int second_right = 12 + XTextWidth(font, second_line,
+                                     (int)strlen(second_line));
+  int first_text_y = first_y - font->ascent / 2;
+  int second_text_y = second_y - font->ascent / 2;
+  int copied_multiline =
+      send_gui_mouse_selection(display, window, 12, first_text_y, second_right,
+                               second_text_y) == 0 &&
+      send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
+      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
+                         sizeof(clipboard_text)) == 0 &&
+      !strcmp(clipboard_text, multiline_text);
+
+  /* Copy remains available while Ctrl+R or the completion picker is active. */
+  int copied_during_search =
+      copied_multiline && send_gui_key(display, window, XK_r, ControlMask) == 0 &&
+      send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
+      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
+                         sizeof(clipboard_text)) == 0 &&
+      !strcmp(clipboard_text, multiline_text);
+  send_gui_key(display, window, XK_Escape, 0);
+
+  /* Without an active selection the clipboard should retain its old value. */
+  int empty_selection_is_noop =
+      send_gui_mouse_selection(display, window, 12, first_text_y, 12,
+                               first_text_y) == 0 &&
+      send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
+      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
+                         sizeof(clipboard_text)) == 0 &&
+      !strcmp(clipboard_text, multiline_text);
+
+  int copied_in_second_tab =
+      send_gui_key(display, window, XK_t, ControlMask) == 0 &&
+      send_gui_text(display, window, "/usr/bin/echo TAB_COPY_MARKER") == 0 &&
+      send_gui_key(display, window, XK_Return, 0) == 0;
+  wait_milliseconds(250);
+  int tab_marker_y = gui_find_text_line(display, window, "TAB_COPY_MARKER", -1);
+  int tab_marker_right = 12 + XTextWidth(font, "TAB_COPY_MARKER", 15);
+  copied_in_second_tab =
+      copied_in_second_tab && tab_marker_y >= 0 &&
+      send_gui_mouse_selection(display, window, 12,
+                               tab_marker_y - font->ascent / 2,
+                               tab_marker_right,
+                               tab_marker_y - font->ascent / 2) == 0 &&
+      send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
+      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
+                         sizeof(clipboard_text)) == 0 &&
+      !strcmp(clipboard_text, "TAB_COPY_MARKER");
+  send_gui_key(display, window, XK_d, ControlMask);
+
+  if (copied_marker && copied_multiline && copied_during_search &&
+      empty_selection_is_noop && copied_in_second_tab)
+    result = 0;
+  else
+    fprintf(stderr,
+            "clipboard test: marker=%d highlight=%d multiline=%d modal=%d "
+            "empty-noop=%d second-tab=%d\n",
+            copied_marker, visibly_selected, copied_multiline,
+            copied_during_search, empty_selection_is_noop,
+            copied_in_second_tab);
+
+  XFreeFont(display, font);
 
   return result;
 }
@@ -4105,54 +4185,61 @@ static int run_gui_feature_test(const char *mode_argument,
         send_gui_key(display, window, XK_Return, 0) < 0) {
       result = -1;
     } else {
-      wait_milliseconds(300);
-      int copied = test_gui_clipboard_copy(display, window, clipboard_display,
-                                           clipboard_window) == 0;
-      *clipboard_ok_out =
-          copied &&
-          paste_external_command(display, window, clipboard_display,
-                                 clipboard_window,
-                                 history_path,
-                                 "/usr/bin/echo TERMINATOR_PASTE_MARKER",
-                                 "TERMINATOR_PASTE_MARKER", 0) == 0;
-      *clipboard_fallback_ok_out =
-          *clipboard_ok_out &&
-          paste_external_command(
-              display, window, clipboard_display, clipboard_window, history_path,
-              "/usr/bin/echo TERMINATOR_FALLBACK_MARKER",
-              "TERMINATOR_FALLBACK_MARKER", 1) == 0;
-      *tab_switch_ok_out =
-          test_gui_tab_switching(display, window, gui_directory) == 0;
-      *crash_ok_out = test_gui_worker_crash(
-                          display, window, child, mode_argument != NULL) == 0;
-      *editor_ok_out = test_gui_editor(display, window, history_path) == 0;
-      *scroll_ok_out = test_gui_scrollback(display, window) == 0;
-    }
-    if (result == 0 &&
-        (send_gui_text(display, window, "cat terminator-completion-uniq") < 0 ||
-        send_gui_key(display, window, XK_Tab, 0) < 0 ||
-         send_gui_key(display, window, XK_Return, 0) < 0)) {
-      result = -1;
-    } else if (result == 0) {
       wait_milliseconds(250);
-      if (send_gui_text(display, window, "cat pick-") < 0 ||
-          send_gui_key(display, window, XK_Tab, 0) < 0 ||
-          send_gui_text(display, window, "9") < 0 ||
-          send_gui_key(display, window, XK_Return, 0) < 0 ||
-          send_gui_key(display, window, XK_BackSpace, 0) < 0) {
+      if (send_gui_text(display, window,
+                        "/usr/bin/printf 'COPY one: spaces\\046and\\044"
+                        "symbol\\043\\041\\nCOPY two: x\\133y\\135"
+                        "\\173z\\175+'") < 0 ||
+          send_gui_key(display, window, XK_Return, 0) < 0) {
         result = -1;
       } else {
-        if (send_gui_text(display, window, "3") < 0 ||
+        wait_milliseconds(300);
+        int copied = test_gui_clipboard_copy(display, window, clipboard_display,
+                                             clipboard_window) == 0;
+        *clipboard_ok_out =
+            copied && paste_external_command(
+                          display, window, clipboard_display, clipboard_window,
+                          history_path, "/usr/bin/echo TERMINATOR_PASTE_MARKER",
+                          "TERMINATOR_PASTE_MARKER", 0) == 0;
+        *clipboard_fallback_ok_out =
+            *clipboard_ok_out &&
+            paste_external_command(
+                display, window, clipboard_display, clipboard_window,
+                history_path, "/usr/bin/echo TERMINATOR_FALLBACK_MARKER",
+                "TERMINATOR_FALLBACK_MARKER", 1) == 0;
+        *tab_switch_ok_out =
+            test_gui_tab_switching(display, window, gui_directory) == 0;
+        *crash_ok_out = test_gui_worker_crash(
+                            display, window, child, mode_argument != NULL) == 0;
+        *editor_ok_out = test_gui_editor(display, window, history_path) == 0;
+        *scroll_ok_out = test_gui_scrollback(display, window) == 0;
+      }
+      if (result == 0 &&
+          (send_gui_text(display, window, "cat terminator-completion-uniq") < 0 ||
+           send_gui_key(display, window, XK_Tab, 0) < 0 ||
+           send_gui_key(display, window, XK_Return, 0) < 0)) {
+        result = -1;
+      } else if (result == 0) {
+        wait_milliseconds(250);
+        if (send_gui_text(display, window, "cat pick-") < 0 ||
+            send_gui_key(display, window, XK_Tab, 0) < 0 ||
+            send_gui_text(display, window, "9") < 0 ||
             send_gui_key(display, window, XK_Return, 0) < 0 ||
-            send_gui_key(display, window, XK_Return, 0) < 0)
+            send_gui_key(display, window, XK_BackSpace, 0) < 0) {
           result = -1;
-        wait_milliseconds(300);
-        if (result == 0 &&
-            (send_gui_text(display, window, "cat no-such-prefix") < 0 ||
-             send_gui_key(display, window, XK_Tab, 0) < 0 ||
-             send_gui_key(display, window, XK_Return, 0) < 0))
-          result = -1;
-        wait_milliseconds(300);
+        } else {
+          if (send_gui_text(display, window, "3") < 0 ||
+              send_gui_key(display, window, XK_Return, 0) < 0 ||
+              send_gui_key(display, window, XK_Return, 0) < 0)
+            result = -1;
+          wait_milliseconds(300);
+          if (result == 0 &&
+              (send_gui_text(display, window, "cat no-such-prefix") < 0 ||
+               send_gui_key(display, window, XK_Tab, 0) < 0 ||
+               send_gui_key(display, window, XK_Return, 0) < 0))
+            result = -1;
+          wait_milliseconds(300);
+        }
       }
     }
   }

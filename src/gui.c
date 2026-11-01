@@ -519,6 +519,15 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
     action = hotkeys_find_action(&hotkey_config, shifted_key,
                                  key_event->state);
   }
+  /* Clipboard shortcuts must work even while history or completion is open. */
+  if (action == HOTKEY_COPY) {
+    selection_copy_to_clipboard(app, dpy, win);
+    return;
+  }
+  if (action == HOTKEY_PASTE) {
+    selection_request_paste(dpy, win);
+    return;
+  }
   if (tab->history_search_active || tab->completion_waiting) {
     handle_modal_key(app, tab, key_symbol, action, buf, n);
     return;
@@ -569,18 +578,15 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
         terminator_stopping = 1;
     }
     return;
-  case HOTKEY_COPY:
-    selection_copy_to_clipboard(app, dpy, win);
-    return;
-  case HOTKEY_PASTE:
-    selection_request_paste(dpy, win);
-    return;
   case HOTKEY_INTERRUPT:
     signal_foreground_job(tab, SIGINT, "^C\n");
     return;
   case HOTKEY_SUSPEND:
     signal_foreground_job(tab, SIGTSTP, "^Z\n");
     return;
+  case HOTKEY_COPY:
+  case HOTKEY_PASTE:
+    return; /* Handled before the modal-key branch above. */
   case HOTKEY_NEW_TAB:
     selection_clear();
     if (app_add_tab(app) < 0)
