@@ -512,6 +512,13 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
   int n = XLookupString(key_event, buf, sizeof(buf), &key_symbol, NULL);
   HotkeyAction action =
       hotkeys_find_action(&hotkey_config, base_key, key_event->state);
+  /* Check the shifted keysym too; keyboard layouts differ in what they
+   * report for Ctrl+Shift+letter shortcuts. */
+  if (action == HOTKEY_NONE && (key_event->state & ShiftMask)) {
+    KeySym shifted_key = XLookupKeysym(key_event, 1);
+    action = hotkeys_find_action(&hotkey_config, shifted_key,
+                                 key_event->state);
+  }
   if (tab->history_search_active || tab->completion_waiting) {
     handle_modal_key(app, tab, key_symbol, action, buf, n);
     return;

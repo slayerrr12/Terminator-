@@ -1877,6 +1877,7 @@ static void test_hotkeys(void) {
       hotkeys_find_action(&config, XK_l, ControlMask) == HOTKEY_CLEAR_SCREEN &&
       hotkeys_find_action(&config, XK_d, ControlMask) == HOTKEY_CLOSE_TAB &&
       hotkeys_find_action(&config, XK_c, ControlMask | ShiftMask) == HOTKEY_COPY &&
+      hotkeys_find_action(&config, XK_C, ControlMask | ShiftMask) == HOTKEY_COPY &&
       hotkeys_find_action(&config, XK_v, ControlMask | ShiftMask) == HOTKEY_PASTE &&
       hotkeys_find_action(&config, XK_c, ControlMask) == HOTKEY_INTERRUPT &&
       hotkeys_find_action(&config, XK_z, ControlMask) == HOTKEY_SUSPEND &&

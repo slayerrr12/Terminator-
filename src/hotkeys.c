@@ -278,6 +278,10 @@ int hotkeys_load_user_config(HotkeyConfig *config, char *warnings,
 
 HotkeyAction hotkeys_find_action(const HotkeyConfig *config, KeySym key,
                                  unsigned int event_state) {
+  /* Some X11 layouts report the shifted symbol (for example XK_C) for
+   * Ctrl+Shift+C. Bindings are stored in lowercase, so normalize letters. */
+  if (key >= XK_A && key <= XK_Z)
+    key += XK_a - XK_A;
   unsigned int modifiers = event_state & relevant_modifiers;
   for (int action = 1; action < HOTKEY_COUNT; action++) {
     HotkeyBinding current = config->bindings[action];
