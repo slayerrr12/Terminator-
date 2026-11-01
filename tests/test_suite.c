@@ -1,8 +1,11 @@
 #include "hotkeys.h"
+#include "completion.h"
 #include "scrollback.h"
 #include "shell.h"
 #include "terminator.h"
+#include <X11/Xlib.h>
 #include <X11/keysym.h>
+#include <X11/Xutil.h>
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -24,11 +27,22 @@ static int total_tests;
 static int passed_tests;
 static int failed_tests;
 static int skipped_tests;
-static char failed_test_ids[128][32];
+static char failed_test_ids[512][32];
 static size_t failed_test_count;
 static char temporary_root[] = "build/tests/tmp-XXXXXX";
 static char *test_root;
 static char shell_directory[TERM_PATH_BUFFER];
+static unsigned int history_test_number;
+static int join_test_path(char *destination, size_t capacity,
+                          const char *directory, const char *name);
+static int write_all(int fd, const char *text, size_t length);
+
+static int set_test_history_path(const char *name) {
+  char path[TERM_PATH_BUFFER];
+  if (join_test_path(path, sizeof(path), test_root, name) < 0)
+    return -1;
+  return setenv("TERMINATOR_HISTORY_FILE", path, 1);
+}
 
 static void print_field(const char *text) {
   if (!text)
@@ -234,6 +248,35 @@ static size_t count_occurrences(const char *text, const char *part) {
   return count;
 }
 
+typedef struct {
+  char text[4096];
+  size_t count;
+} HistorySearchCapture;
+
+static void capture_history_match(const char *command, void *context) {
+  HistorySearchCapture *capture = context;
+  size_t used = strlen(capture->text);
+  size_t remaining = sizeof(capture->text) - used;
+  if (remaining > 1)
+    snprintf(capture->text + used, remaining, "%s\n", command);
+  capture->count++;
+}
+
+static size_t brute_longest_common_substring(const char *first,
+                                             const char *second) {
+  size_t best = 0;
+  for (size_t start = 0; first[start]; start++) {
+    for (size_t length = 1; first[start + length - 1]; length++) {
+      char part[TERM_LINE_MAX];
+      memcpy(part, first + start, length);
+      part[length] = '\0';
+      if (strstr(second, part) && length > best)
+        best = length;
+    }
+  }
+  return best;
+}
+
 static void test_parser(void) {
   report_test("P001", "parser", "empty input is complete", "empty string",
               "complete", shell_is_complete("") ? "complete" : "incomplete",
@@ -398,56 +441,1091 @@ static void test_parser(void) {
 }
 
 static void test_history(void) {
+  set_test_history_path("history-unit");
   SharedHistory *history = calloc(1, sizeof(*history));
   if (!history || history_init(history, 0) < 0) {
-    report_test("H001", "history", "initialize shared ring", "history_init",
+    report_test("H001", "history", "initialize persistent history", "history_init",
                 "initialized", "allocation or semaphore initialization failed",
                 0, "");
     free(history);
     return;
   }
-  char (*snapshot)[TERM_LINE_MAX] = calloc(TERM_HISTORY_CAP, sizeof(*snapshot));
+  char (*snapshot)[TERM_LINE_MAX] = calloc(12, sizeof(*snapshot));
   char value[64];
   for (int i = 0; i < TERM_HISTORY_CAP + 6; i++) {
-    snprintf(value, sizeof(value), "cmd%d", i);
-    history_add(history, value);
+    snprintf(value, sizeof(value), "cmd%05d", i);
+    if (history_add(history, value) < 0)
+      break;
   }
-  size_t count = history_snapshot(history, snapshot, TERM_HISTORY_CAP);
-  int ring_ok = count == TERM_HISTORY_CAP && !strcmp(snapshot[0], "cmd6") &&
-                !strcmp(snapshot[count - 1], "cmd1029");
-  report_test("H002", "history", "ring wraps at configured capacity",
-              "add 1,030 commands", "keeps cmd6 through cmd1029",
-              ring_ok ? "kept newest 1,024 in order" : "ring contents differ",
-              ring_ok, "");
+  size_t count = history_snapshot(history, snapshot, 10);
+  int cap_ok = count == 10 && !strcmp(snapshot[0], "cmd09996") &&
+               !strcmp(snapshot[9], "cmd10005");
+  report_test("H002", "history", "persistent file keeps newest 10,000 commands",
+              "add 10,006 commands", "history ends at cmd10005 and starts at cmd00006",
+              cap_ok ? "newest entries are retained" : "history range differs",
+              cap_ok, "The test reads only ten rows to keep memory use small.");
 
   char recent[64] = {0};
   int recent_ok = history_get_recent(history, 0, recent, sizeof(recent)) &&
-                  !strcmp(recent, "cmd1029");
+                  !strcmp(recent, "cmd10005");
   report_test("H003", "history", "retrieve most recent entry", "offset 0",
-              "cmd1029", recent, recent_ok, "");
+              "cmd10005", recent, recent_ok, "");
 
   count = history_snapshot(history, snapshot, 5);
-  int limited_ok = count == 5 && !strcmp(snapshot[0], "cmd1025") &&
-                   !strcmp(snapshot[4], "cmd1029");
-  report_test("H004", "history", "snapshot respects requested maximum",
+  int limited_ok = count == 5 && !strcmp(snapshot[0], "cmd10001") &&
+                   !strcmp(snapshot[4], "cmd10005");
+  report_test("H004", "history", "snapshot returns requested newest rows",
               "snapshot max_entries=5", "latest five entries",
-              limited_ok ? "cmd1025 through cmd1029" : "different snapshot",
+              limited_ok ? "cmd10001 through cmd10005" : "different snapshot",
               limited_ok, "");
 
-  history_add(history, "");
-  count = history_snapshot(history, snapshot, TERM_HISTORY_CAP);
-  int empty_ok = count == TERM_HISTORY_CAP && !strcmp(snapshot[count - 1], "cmd1029");
+  int empty_add_ok = history_add(history, "") == 0;
+  count = history_snapshot(history, snapshot, 1);
+  int empty_ok = empty_add_ok && count == 1 && !strcmp(snapshot[0], "cmd10005");
   report_test("H005", "history", "empty command is not recorded", "add empty line",
               "history unchanged", empty_ok ? "unchanged" : "changed", empty_ok,
               "");
   int missing_ok = !history_get_recent(history, TERM_HISTORY_CAP, recent,
                                        sizeof(recent));
   report_test("H006", "history", "out-of-range history offset is rejected",
-              "request offset 1,024", "returns no entry",
+              "request offset 10,000", "returns no entry",
               missing_ok ? "no entry" : recent, missing_ok, "");
+
+  int multiline_ok = history_add(history, "first line\nsecond\\line") == 0;
+  int reinitialize_ok = 0;
+  sem_destroy(&history->semaphore);
+  if (multiline_ok && history_init(history, 0) == 0) {
+    reinitialize_ok = history_get_recent(history, 0, recent, sizeof(recent)) &&
+                      !strcmp(recent, "first line\nsecond\\line");
+  }
+  report_test("H007", "history persistence", "restart reloads escaped multiline entry",
+              "add command with newline and backslash; initialize again",
+              "same command bytes are recovered",
+              reinitialize_ok ? "multiline command restored" : "command differed",
+              reinitialize_ok, "The file uses escaped physical lines.");
+
+  history_add(history, "run myprog -v");
+  history_add(history, "run myprog --help");
+  HistorySearchCapture matches = {0};
+  size_t best = 0;
+  int found = history_search(history, "myprog", capture_history_match,
+                             &matches, &best);
+  int exact_ok = found == 2 && matches.count == 2 &&
+                 contains(matches.text, "run myprog -v") &&
+                 contains(matches.text, "run myprog --help");
+  report_test("H008", "history search", "exact term returns all matching commands",
+              "search myprog", "two matching history commands",
+              matches.text, exact_ok, "");
+
+  history_add(history, "/tmp/alpha-one");
+  history_add(history, "/tmp/alpha-two");
+  memset(&matches, 0, sizeof(matches));
+  found = history_search(history, "zzalphaqq", capture_history_match,
+                         &matches, &best);
+  int similar_ok = found == 2 && best == 5 && matches.count == 2 &&
+                   contains(matches.text, "/tmp/alpha-one") &&
+                   contains(matches.text, "/tmp/alpha-two");
+  report_test("H009", "history search", "fallback returns longest shared substring ties",
+              "search zzalphaqq", "two commands with shared substring alpha",
+              matches.text, similar_ok, "Best substring must be longer than two bytes.");
+
+  memset(&matches, 0, sizeof(matches));
+  found = history_search(history, "qx", capture_history_match, &matches, &best);
+  int too_short_ok = found == 0 && matches.count == 0 && best <= 2;
+  report_test("H010", "history search", "two-byte fallback is rejected", "search qx",
+              "no callback results", matches.text, too_short_ok, "");
+  found = history_search(history, "no-such-history-command", NULL, NULL, &best);
+  int not_found_ok = found == 0;
+  report_test("H011", "history search", "missing term returns zero", "unique absent term",
+              "zero matches", found == 0 ? "zero matches" : "unexpected result",
+              not_found_ok, "");
+  found = history_search(history, "", NULL, NULL, &best);
+  int empty_search_ok = found == 0;
+  report_test("H012", "history search", "empty search is safe", "empty term",
+              "zero matches", found == 0 ? "zero matches" : "unexpected result",
+              empty_search_ok, "");
+
+  set_test_history_path("history-search-oracle");
+  SharedHistory oracle_history = {0};
+  const char *commands[] = {"abca", "aacb", "cabca", "bdabc", "ddcaa",
+                            "ababa", "bcacb", "zzabx", "xxxy", "xabcx"};
+  const char *terms[] = {"ab", "abc", "abca", "bcac", "zyx",
+                         "zzac", "cbb", "aacaa", "bca", "xyq"};
+  int oracle_initialized = history_init(&oracle_history, 0) == 0;
+  int oracle_ok = oracle_initialized;
+  for (size_t i = 0; oracle_ok && i < sizeof(commands) / sizeof(commands[0]); i++)
+    oracle_ok = history_add(&oracle_history, commands[i]) == 0;
+  for (size_t term_index = 0;
+       oracle_ok && term_index < sizeof(terms) / sizeof(terms[0]); term_index++) {
+    const char *term = terms[term_index];
+    size_t expected_best = 0;
+    int has_exact = 0;
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
+      if (strstr(commands[i], term))
+        has_exact = 1;
+
+    char expected[4096] = "";
+    size_t expected_count = 0;
+    if (has_exact) {
+      for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+        if (strstr(commands[i], term)) {
+          snprintf(expected + strlen(expected), sizeof(expected) - strlen(expected),
+                   "%s\n", commands[i]);
+          expected_count++;
+        }
+      }
+    } else {
+      for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+        size_t shared = brute_longest_common_substring(term, commands[i]);
+        if (shared > expected_best)
+          expected_best = shared;
+      }
+      if (expected_best > 2) {
+        for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+          if (brute_longest_common_substring(term, commands[i]) == expected_best) {
+            snprintf(expected + strlen(expected), sizeof(expected) - strlen(expected),
+                     "%s\n", commands[i]);
+            expected_count++;
+          }
+        }
+      }
+    }
+    HistorySearchCapture actual = {0};
+    size_t actual_best = 0;
+    int actual_count = history_search(&oracle_history, term,
+                                      capture_history_match, &actual,
+                                      &actual_best);
+    if (actual_count != (int)expected_count || actual.count != expected_count ||
+        strcmp(actual.text, expected) || actual_best != expected_best)
+      oracle_ok = 0;
+  }
+  report_test("H013", "history search", "suffix search agrees with brute-force oracle",
+              "10 overlapping and repeated-character queries",
+              "same exact matches or best-substring ties as reference logic",
+              oracle_ok ? "all ten query results match" : "a result differed",
+              oracle_ok, "Exercises substring automaton fallback and exact matching.");
+  if (oracle_initialized)
+    sem_destroy(&oracle_history.semaphore);
+
+  set_test_history_path("history-concurrent");
+  SharedHistory concurrent_history = {0};
+  int concurrent_initialized = history_init(&concurrent_history, 0) == 0;
+  int concurrent_ok = concurrent_initialized;
+  pid_t writer = concurrent_ok ? fork() : -1;
+  if (writer == 0) {
+    SharedHistory child_history = {0};
+    int child_ok = history_init(&child_history, 0) == 0;
+    for (int i = 0; child_ok && i < 100; i++) {
+      char entry[32];
+      snprintf(entry, sizeof(entry), "child-%03d", i);
+      child_ok = history_add(&child_history, entry) == 0;
+    }
+    if (child_ok)
+      sem_destroy(&child_history.semaphore);
+    _exit(child_ok ? 0 : 1);
+  }
+  if (writer < 0)
+    concurrent_ok = 0;
+  for (int i = 0; concurrent_ok && i < 100; i++) {
+    char entry[32];
+    snprintf(entry, sizeof(entry), "parent-%03d", i);
+    concurrent_ok = history_add(&concurrent_history, entry) == 0;
+  }
+  if (writer > 0) {
+    int writer_status = 0;
+    concurrent_ok = waitpid(writer, &writer_status, 0) == writer &&
+                    WIFEXITED(writer_status) && WEXITSTATUS(writer_status) == 0 &&
+                    concurrent_ok;
+  }
+  char (*concurrent_rows)[TERM_LINE_MAX] = calloc(200, sizeof(*concurrent_rows));
+  size_t concurrent_count = concurrent_rows
+                                ? history_snapshot(&concurrent_history,
+                                                   concurrent_rows, 200)
+                                : 0;
+  int all_writers_ok = concurrent_ok && concurrent_count == 200;
+  int parent_rows = 0;
+  int child_rows = 0;
+  for (size_t i = 0; i < concurrent_count; i++) {
+    parent_rows += !strncmp(concurrent_rows[i], "parent-", 7);
+    child_rows += !strncmp(concurrent_rows[i], "child-", 6);
+  }
+  all_writers_ok = all_writers_ok && parent_rows == 100 && child_rows == 100;
+  report_test("H014", "history concurrency", "independent processes append without lost rows",
+              "two writers append 100 entries each", "200 entries remain in the file",
+              all_writers_ok ? "all parent and child rows found" : "rows were lost",
+              all_writers_ok, "Uses the sidecar flock while each process has its own semaphore.");
+  free(concurrent_rows);
+  if (concurrent_initialized)
+    sem_destroy(&concurrent_history.semaphore);
+
   sem_destroy(&history->semaphore);
   free(snapshot);
   free(history);
+}
+
+static void test_history_edges(void) {
+  set_test_history_path("history-edges");
+  SharedHistory history = {0};
+  int initialized = history_init(&history, 0) == 0;
+  report_test("H015", "history file", "new history file uses private permissions",
+              "initialize a fresh history file", "mode is 0600",
+              initialized ? "initialized" : "initialization failed", initialized,
+              "Checks the file mode rather than relying on the process umask.");
+  if (!initialized)
+    return;
+  struct stat file_info;
+  int private_file = stat(history.file_path, &file_info) == 0 &&
+                     (file_info.st_mode & 0777) == 0600;
+  report_test("H016", "history file", "history data is not world-readable",
+              history.file_path, "permissions are exactly 0600",
+              private_file ? "mode 0600" : "unexpected mode or stat failure",
+              private_file, "The lock file is private as well.");
+
+  size_t empty_start_count = history.entry_count;
+  int null_add_ok = history_add(NULL, "ignored") == 0 &&
+                    history_add(&history, NULL) == 0 &&
+                    history_add(&history, "") == 0 &&
+                    history.entry_count == empty_start_count;
+  report_test("H017", "history boundaries", "null and empty entries are ignored",
+              "history_add(NULL), history_add(history,NULL), history_add(empty)",
+              "no crash and no entry", null_add_ok ? "all inputs ignored" : "unexpected result",
+              null_add_ok, "The worker records only non-empty submitted commands.");
+
+  char too_long[TERM_LINE_MAX + 1];
+  memset(too_long, 'x', sizeof(too_long) - 1);
+  too_long[sizeof(too_long) - 1] = '\0';
+  errno = 0;
+  int too_long_result = history_add(&history, too_long);
+  int long_rejected = too_long_result < 0 && errno == E2BIG;
+  report_test("H018", "history boundaries", "oversized command is rejected safely",
+              "add TERM_LINE_MAX bytes", "returns error E2BIG",
+              long_rejected ? "rejected with E2BIG" : "accepted or wrong error",
+              long_rejected, "Does not append a truncated command.");
+
+  history_add(&history, "alpha-beta exact");
+  history_add(&history, "alpha-xxxxx only-shares-alpha");
+  history_add(&history, "duplicate-term");
+  history_add(&history, "duplicate-term");
+  history_add(&history, "boundary-abc-match");
+  HistorySearchCapture matches = {0};
+  size_t best = 0;
+  int found = history_search(&history, "alpha-beta", capture_history_match,
+                             &matches, &best);
+  int exact_precedence = found == 1 && matches.count == 1 &&
+                         !strcmp(matches.text, "alpha-beta exact\n");
+  report_test("H019", "history search", "exact matches suppress approximate matches",
+              "search alpha-beta", "only the command containing the full term",
+              matches.text, exact_precedence,
+              "A longer common fragment in another command must not replace an exact hit.");
+
+  memset(&matches, 0, sizeof(matches));
+  found = history_search(&history, "duplicate-term", capture_history_match,
+                         &matches, &best);
+  int duplicate_ok = found == 2 && matches.count == 2 &&
+                     count_occurrences(matches.text, "duplicate-term\n") == 2;
+  report_test("H020", "history search", "repeated commands stay as separate history rows",
+              "search duplicate-term", "both submitted copies are returned",
+              matches.text, duplicate_ok, "History does not deduplicate commands.");
+
+  memset(&matches, 0, sizeof(matches));
+  found = history_search(&history, "xxabczz", capture_history_match,
+                         &matches, &best);
+  int three_byte_match = found == 1 && best == 3 &&
+                         contains(matches.text, "boundary-abc-match");
+  report_test("H021", "history search", "fallback accepts a three-byte shared substring",
+              "search xxabczz", "command sharing exactly abc is returned",
+              matches.text, three_byte_match, "Two-byte matches remain below the threshold.");
+
+  found = history_search(&history, "duplicate-term", NULL, NULL, &best);
+  int no_callback_ok = found == 2;
+  report_test("H022", "history search", "counting works without a callback",
+              "search duplicate-term with callback=NULL", "returns two matches",
+              no_callback_ok ? "two matches" : "wrong match count", no_callback_ok, "");
+
+  char short_buffer[5] = {0};
+  int small_buffer_ok = history_get_recent(&history, 0, short_buffer,
+                                           sizeof(short_buffer)) &&
+                        !strcmp(short_buffer, "boun");
+  report_test("H023", "history snapshot", "small output buffer is safely terminated",
+              "read newest row into 5 bytes", "returns the first four bytes and NUL",
+              short_buffer, small_buffer_ok, "Caller-owned buffer remains terminated.");
+
+  char zero_capacity_row[TERM_LINE_MAX] = {0};
+  int zero_snapshot_ok = history_snapshot(&history, NULL, 1) == 0 &&
+                         history_snapshot(&history, &zero_capacity_row, 0) == 0;
+  report_test("H024", "history snapshot", "null snapshot and zero capacity are safe",
+              "snapshot(NULL,1); snapshot(buffer,0)", "both return zero",
+              zero_snapshot_ok ? "zero rows" : "unexpected result", zero_snapshot_ok, "");
+
+  size_t before = history.entry_count;
+  int cr_ok = history_add(&history, "line\rreturn\\tail") == 0;
+  sem_destroy(&history.semaphore);
+  int reopened = cr_ok && history_init(&history, 0) == 0;
+  char recent[TERM_LINE_MAX] = {0};
+  int cr_round_trip = reopened && history_get_recent(&history, 0, recent,
+                                                     sizeof(recent)) &&
+                      !strcmp(recent, "line\rreturn\\tail");
+  report_test("H025", "history persistence", "carriage return and backslash survive restart",
+              "append CR and backslash, reopen file", "all original bytes are restored",
+              cr_round_trip ? "record restored exactly" : "record changed", cr_round_trip,
+              "The file escapes CR and backslash so one command stays one physical row.");
+
+  int too_long_search = 0;
+  char huge_term[TERM_LINE_MAX + 1];
+  memset(huge_term, 'q', sizeof(huge_term) - 1);
+  huge_term[sizeof(huge_term) - 1] = '\0';
+  too_long_search = history_search(&history, huge_term, NULL, NULL, &best) == 0;
+  report_test("H026", "history search", "overlong search term returns no result",
+              "search TERM_LINE_MAX bytes", "returns zero without allocating an oversized automaton",
+              too_long_search ? "zero matches" : "unexpected result", too_long_search, "");
+
+  int unchanged_count = reopened && history.entry_count >= before + 1;
+  report_test("H027", "history cache", "reopen refreshes persistent entry count",
+              "reinitialize after CR entry", "new row is included in the count",
+              unchanged_count ? "entry count refreshed" : "entry count differed",
+              unchanged_count, "Count describes physical records in the history file.");
+  sem_destroy(&history.semaphore);
+
+  char default_home[TERM_PATH_BUFFER];
+  join_test_path(default_home, sizeof(default_home), test_root, "history-home");
+  mkdir(default_home, 0700);
+  const char *old_home_value = getenv("HOME");
+  char *saved_home = old_home_value ? strdup(old_home_value) : NULL;
+  char *saved_history = getenv("TERMINATOR_HISTORY_FILE")
+                            ? strdup(getenv("TERMINATOR_HISTORY_FILE"))
+                            : NULL;
+  setenv("HOME", default_home, 1);
+  unsetenv("TERMINATOR_HISTORY_FILE");
+  SharedHistory default_history = {0};
+  int default_ok = history_init(&default_history, 0) == 0;
+  char expected_path[TERM_PATH_BUFFER];
+  join_test_path(expected_path, sizeof(expected_path), default_home,
+                 ".terminator_history");
+  default_ok = default_ok && !strcmp(default_history.file_path, expected_path);
+  report_test("H028", "history configuration", "default history is under HOME",
+              "unset override; HOME=<temporary directory>",
+              "uses ~/.terminator_history", default_ok ? default_history.file_path
+                                                        : "wrong path or initialization failed",
+              default_ok, "TERMINATOR_HISTORY_FILE remains available for test isolation.");
+  if (default_ok)
+    sem_destroy(&default_history.semaphore);
+  if (saved_home) {
+    setenv("HOME", saved_home, 1);
+    free(saved_home);
+  } else {
+    unsetenv("HOME");
+  }
+  if (saved_history) {
+    setenv("TERMINATOR_HISTORY_FILE", saved_history, 1);
+    free(saved_history);
+  } else {
+    unsetenv("TERMINATOR_HISTORY_FILE");
+  }
+
+  const char *restored_home_value = getenv("HOME");
+  char *restored_home = restored_home_value ? strdup(restored_home_value) : NULL;
+  const char *restored_history_value = getenv("TERMINATOR_HISTORY_FILE");
+  char *restored_history = restored_history_value
+                               ? strdup(restored_history_value)
+                               : NULL;
+  unsetenv("HOME");
+  unsetenv("TERMINATOR_HISTORY_FILE");
+  SharedHistory missing_home_history = {0};
+  errno = 0;
+  int missing_home_result = history_init(&missing_home_history, 0);
+  int missing_home_ok = missing_home_result < 0 && errno == ENOENT;
+  report_test("H112", "history configuration", "missing HOME reports the right error",
+              "unset HOME and history path override", "fails with ENOENT",
+              missing_home_ok ? "ENOENT" : "wrong return or errno",
+              missing_home_ok, "Keeps the path-construction error for the caller.");
+
+  char long_path[TERM_PATH_BUFFER];
+  memset(long_path, 'p', sizeof(long_path) - 1);
+  long_path[sizeof(long_path) - 1] = '\0';
+  setenv("HOME", default_home, 1);
+  setenv("TERMINATOR_HISTORY_FILE", long_path, 1);
+  SharedHistory long_path_history = {0};
+  errno = 0;
+  int long_path_result = history_init(&long_path_history, 0);
+  int long_path_ok = long_path_result < 0 && errno == ENAMETOOLONG;
+  report_test("H113", "history configuration", "overlong history path is rejected",
+              "set override to 4,095 bytes", "fails with ENAMETOOLONG",
+              long_path_ok ? "ENAMETOOLONG" : "wrong return or errno",
+              long_path_ok, "No file is opened for a path too large for SharedHistory.");
+  if (restored_home) {
+    setenv("HOME", restored_home, 1);
+    free(restored_home);
+  } else {
+    unsetenv("HOME");
+  }
+  if (restored_history) {
+    setenv("TERMINATOR_HISTORY_FILE", restored_history, 1);
+    free(restored_history);
+  } else {
+    unsetenv("TERMINATOR_HISTORY_FILE");
+  }
+}
+
+static void test_history_search_matrix(void) {
+  set_test_history_path("history-search-matrix");
+  SharedHistory history = {0};
+  if (history_init(&history, 0) < 0) {
+    report_test("H029", "history search", "initialize generated search matrix",
+                "history_init", "ready", "initialization failed", 0, "");
+    return;
+  }
+  const char *commands[] = {"abcabc", "abccba", "cababa", "ccabca",
+                            "baacbb", "bcbcaa", "cabbcc", "abcxyz"};
+  int entries_added = 1;
+  for (size_t i = 0; entries_added &&
+                     i < sizeof(commands) / sizeof(commands[0]); i++)
+    entries_added = history_add(&history, commands[i]) == 0;
+  if (!entries_added) {
+    report_test("H030", "history search", "seed generated search matrix",
+                "append eight test commands", "all commands recorded",
+                "one or more appends failed", 0, "");
+    sem_destroy(&history.semaphore);
+    return;
+  }
+  int case_number = 31;
+  for (int a = 0; a < 3; a++)
+    for (int b = 0; b < 3; b++)
+      for (int c = 0; c < 3; c++)
+        for (int d = 0; d < 3; d++) {
+          char term[] = {(char)('a' + a), (char)('a' + b),
+                         (char)('a' + c), (char)('a' + d), '\0'};
+          int has_exact = 0;
+          for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
+            if (strstr(commands[i], term))
+              has_exact = 1;
+          size_t expected_best = 0;
+          char expected[4096] = "";
+          size_t expected_count = 0;
+          if (has_exact) {
+            for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+              if (strstr(commands[i], term)) {
+                size_t used = strlen(expected);
+                snprintf(expected + used, sizeof(expected) - used,
+                         "%s\n", commands[i]);
+                expected_count++;
+              }
+            }
+          } else {
+            for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+              size_t shared = brute_longest_common_substring(term, commands[i]);
+              if (shared > expected_best)
+                expected_best = shared;
+            }
+            if (expected_best > 2) {
+              for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+                if (brute_longest_common_substring(term, commands[i]) ==
+                    expected_best) {
+                  size_t used = strlen(expected);
+                  snprintf(expected + used, sizeof(expected) - used,
+                           "%s\n", commands[i]);
+                  expected_count++;
+                }
+              }
+            }
+          }
+
+          HistorySearchCapture actual = {0};
+          size_t actual_best = 0;
+          int actual_count = history_search(&history, term,
+                                            capture_history_match, &actual,
+                                            &actual_best);
+          int case_ok = actual_count == (int)expected_count &&
+                        actual.count == expected_count &&
+                        !strcmp(actual.text, expected) &&
+                        actual_best == expected_best;
+          char id[16];
+          snprintf(id, sizeof(id), "H%03d", case_number);
+          report_test(id, "history search", "generated exact/fallback query",
+                      term, "matches the brute-force substring oracle",
+                      case_ok ? "oracle agrees" : "result differs", case_ok,
+                      "The query is one of 81 strings over the alphabet abc.");
+          case_number++;
+        }
+  sem_destroy(&history.semaphore);
+}
+
+static void test_completion(void) {
+  char directory[TERM_PATH_BUFFER];
+  char subdirectory[TERM_PATH_BUFFER];
+  char path[TERM_PATH_BUFFER];
+  join_test_path(directory, sizeof(directory), test_root, "completion");
+  mkdir(directory, 0700);
+  join_test_path(path, sizeof(path), directory, "alpha.txt");
+  write_text_file(path, "a");
+  join_test_path(path, sizeof(path), directory, "alpine.txt");
+  write_text_file(path, "b");
+  join_test_path(path, sizeof(path), directory, "document.txt");
+  write_text_file(path, "doc");
+  join_test_path(path, sizeof(path), directory, "space file.txt");
+  write_text_file(path, "space");
+  join_test_path(path, sizeof(path), directory, ".secret");
+  write_text_file(path, "hidden");
+  join_test_path(subdirectory, sizeof(subdirectory), directory, "subdir");
+  mkdir(subdirectory, 0700);
+  join_test_path(path, sizeof(path), subdirectory, "inside.txt");
+  write_text_file(path, "inside");
+
+  CompletionResult result;
+  char *prefix = NULL;
+  const char *line = "cat al";
+  int scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  char *common = completion_common_prefix(result.items, result.count);
+  int multiple_ok = scan == 0 && result.count == 2 && !strcmp(prefix, "al") &&
+                    common && !strcmp(common, "alp");
+  report_test("C001", "filename completion", "multiple matches find longest common prefix",
+              line, "alpha.txt and alpine.txt; common prefix alp",
+              multiple_ok ? common : "candidate list or prefix differed",
+              multiple_ok, "");
+  free(common);
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat docu";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int one_ok = scan == 0 && result.count == 1 &&
+               !strcmp(result.items[0], "document.txt");
+  report_test("C002", "filename completion", "one matching file is returned",
+              line, "document.txt", one_ok ? result.items[0] : "no unique match",
+              one_ok, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat sub";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int directory_ok = scan == 0 && result.count == 1 &&
+                     !strcmp(result.items[0], "subdir/");
+  report_test("C003", "filename completion", "directories receive a slash",
+              line, "subdir/", directory_ok ? result.items[0] : "no directory candidate",
+              directory_ok, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat subdir/in";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int nested_ok = scan == 0 && result.count == 1 &&
+                  !strcmp(result.items[0], "subdir/inside.txt");
+  report_test("C004", "filename completion", "nested path uses the tab directory",
+              line, "subdir/inside.txt", nested_ok ? result.items[0] : "no nested match",
+              nested_ok, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat ";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int hidden_ok = scan == 0 && result.count >= 4;
+  for (size_t i = 0; i < result.count; i++)
+    if (result.items[i][0] == '.')
+      hidden_ok = 0;
+  report_test("C005", "filename completion", "hidden files are omitted for an empty prefix",
+              line, "ordinary names only", hidden_ok ? "hidden entry omitted"
+                                                       : "hidden entry was listed",
+              hidden_ok, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat .";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int dotfile_ok = scan == 0 && result.count == 1 &&
+                   !strcmp(result.items[0], ".secret");
+  report_test("C006", "filename completion", "dotfiles appear when the prefix starts with a dot",
+              line, ".secret", dotfile_ok ? result.items[0] : "dotfile missing",
+              dotfile_ok, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat 'space f";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  char *encoded = completion_encode_suffix("ile.txt", result.quote);
+  int quote_ok = scan == 0 && result.count == 1 &&
+                 !strcmp(result.items[0], "space file.txt") &&
+                 result.quote == '\'' && encoded && !strcmp(encoded, "ile.txt");
+  report_test("C007", "filename completion", "quoted path prefix is decoded and kept quoted",
+              line, "space file.txt with single-quote context",
+              quote_ok ? "quoted completion matches" : "quoted completion differed",
+              quote_ok, "");
+  free(encoded);
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat space\\ f";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int escaped_ok = scan == 0 && result.count == 1 &&
+                   !strcmp(prefix, "space f") &&
+                   !strcmp(result.items[0], "space file.txt");
+  report_test("C008", "filename completion", "escaped whitespace is matched",
+              line, "space file.txt", escaped_ok ? result.items[0] : "no escaped match",
+              escaped_ok, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat missing-file-prefix";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int no_match_ok = scan == 0 && result.count == 0;
+  report_test("C009", "filename completion", "no matching file leaves no candidates",
+              line, "zero candidates", no_match_ok ? "zero candidates" : "unexpected match",
+              no_match_ok, "");
+  free(prefix);
+  completion_free(&result);
+
+  char editable[64] = "cat al|grep";
+  size_t editable_length = strlen(editable);
+  size_t cursor = 6;
+  int insert_ok = completion_insert_text(editable, sizeof(editable),
+                                         &editable_length, &cursor, "pha.txt") == 0 &&
+                  !strcmp(editable, "cat alpha.txt|grep") && cursor == 13;
+  report_test("C010", "filename completion", "insertion preserves text after cursor",
+              "cat al|grep; insert pha.txt at cursor", "cat alpha.txt|grep",
+              editable, insert_ok, "");
+
+  char quoted[64] = "cat ";
+  size_t quoted_length = strlen(quoted);
+  cursor = quoted_length;
+  char *escaped_suffix = completion_encode_suffix("space\\ file.txt", 0);
+  int escaping_ok = escaped_suffix &&
+                    completion_insert_text(quoted, sizeof(quoted), &quoted_length,
+                                           &cursor, escaped_suffix) == 0 &&
+                    !strcmp(quoted, "cat space\\\\\\ file.txt");
+  report_test("C011", "filename completion", "unquoted inserted text is escaped for the parser",
+              "insert a space and backslash", "shell metacharacters are quoted",
+              quoted, escaping_ok, "");
+  free(escaped_suffix);
+
+  char absolute_line[TERM_PATH_BUFFER + 32];
+  snprintf(absolute_line, sizeof(absolute_line), "cat %s/al", directory);
+  scan = completion_find(absolute_line, strlen(absolute_line), directory,
+                         &result, &prefix);
+  int absolute_ok = scan == 0 && result.count == 2 &&
+                    !strncmp(result.items[0], directory, strlen(directory));
+  report_test("C012", "filename completion", "absolute directory prefix is scanned",
+              absolute_line, "absolute alpha and alpine paths",
+              absolute_ok ? result.items[0] : "absolute path not found",
+              absolute_ok, "");
+  free(prefix);
+  completion_free(&result);
+
+  char *choices[] = {"abc.txt", "abcd.txt"};
+  char choice_line[64] = "run abc|sort";
+  size_t choice_length = strlen(choice_line);
+  size_t choice_cursor = strlen("run abc");
+  int choose_ok = completion_select(choice_line, sizeof(choice_line),
+                                    &choice_length, &choice_cursor, choices, 2,
+                                    1, 3, 0) == 0 &&
+                  !strcmp(choice_line, "run abc.txt|sort");
+  report_test("C013", "filename completion", "numbered choice inserts selected suffix",
+              "choose 1 from abc.txt and abcd.txt", "run abc.txt|sort",
+              choice_line, choose_ok, "The untouched text after the cursor stays in place.");
+
+  char invalid_choice_line[32] = "abc";
+  size_t invalid_length = 3;
+  size_t invalid_cursor = 3;
+  int invalid_choice_ok = completion_select(
+                              invalid_choice_line, sizeof(invalid_choice_line),
+                              &invalid_length, &invalid_cursor, choices, 2, 3,
+                              3, 0) < 0 && !strcmp(invalid_choice_line, "abc");
+  report_test("C014", "filename completion", "out-of-range selection changes nothing",
+              "choose 3 from two candidates", "input remains abc",
+              invalid_choice_line, invalid_choice_ok, "");
+
+  char apostrophe_name[] = "can't.txt";
+  char *apostrophe_suffix = completion_encode_suffix(apostrophe_name + 3, '\'');
+  const char apostrophe_expected[] = {'\'', '\\', '\'', '\'', 't', '.',
+                                      't', 'x', 't', '\0'};
+  int apostrophe_ok = apostrophe_suffix &&
+                      !strcmp(apostrophe_suffix, apostrophe_expected);
+  report_test("C015", "filename completion", "apostrophe is escaped inside single quotes",
+              "complete can't.txt inside an open single quote",
+              "close quote, escape apostrophe, reopen quote",
+              apostrophe_suffix ? apostrophe_suffix : "allocation failed",
+              apostrophe_ok, "");
+  free(apostrophe_suffix);
+
+  char *double_suffix = completion_encode_suffix("$name`", '"');
+  int double_quote_ok = double_suffix && !strcmp(double_suffix, "\\$name\\`");
+  report_test("C016", "filename completion", "expansion characters are escaped in double quotes",
+              "$name backtick", "both shell expansion characters escaped",
+              double_suffix ? double_suffix : "allocation failed",
+              double_quote_ok, "");
+  free(double_suffix);
+
+  char short_line[5] = "abc";
+  size_t short_length = 3;
+  size_t short_cursor = 3;
+  int boundary_ok = completion_insert_text(short_line, sizeof(short_line),
+                                           &short_length, &short_cursor,
+                                           "long") == 0 &&
+                    !strcmp(short_line, "abcl") && short_length == 4;
+  report_test("C017", "filename completion", "insertion respects input buffer capacity",
+              "insert longer text than the one-byte space left", "safe truncation to abcl",
+              short_line, boundary_ok, "");
+
+  char other_directory[TERM_PATH_BUFFER];
+  join_test_path(other_directory, sizeof(other_directory), test_root,
+                 "completion-other");
+  mkdir(other_directory, 0700);
+  join_test_path(path, sizeof(path), other_directory, "only-here.txt");
+  write_text_file(path, "other");
+  line = "cat only";
+  scan = completion_find(line, strlen(line), other_directory, &result, &prefix);
+  int tab_directory_ok = scan == 0 && result.count == 1 &&
+                         !strcmp(result.items[0], "only-here.txt");
+  report_test("C018", "filename completion", "candidate source is the active tab directory",
+              line, "only-here.txt from supplied directory",
+              tab_directory_ok ? result.items[0] : "wrong directory searched",
+              tab_directory_ok, "Each tab passes its own working directory.");
+  free(prefix);
+  completion_free(&result);
+}
+
+static void test_completion_edges(void) {
+  char directory[TERM_PATH_BUFFER];
+  char nested[TERM_PATH_BUFFER];
+  char deeper[TERM_PATH_BUFFER];
+  char path[TERM_PATH_BUFFER];
+  join_test_path(directory, sizeof(directory), test_root, "completion-edge");
+  mkdir(directory, 0700);
+  join_test_path(nested, sizeof(nested), directory, "nested");
+  mkdir(nested, 0700);
+  join_test_path(deeper, sizeof(deeper), nested, "deeper");
+  mkdir(deeper, 0700);
+  const char *names[] = {"alpha.txt", "albatross", "beta.txt", "space file.txt",
+                         "quote'file.txt", "semi;colon.txt", "$cash.txt",
+                         ".hidden", "line\nbreak.txt",
+                         "carriage\rreturn.txt"};
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    join_test_path(path, sizeof(path), directory, names[i]);
+    write_text_file(path, "fixture\n");
+  }
+  join_test_path(path, sizeof(path), nested, "inside.txt");
+  write_text_file(path, "nested\n");
+  join_test_path(path, sizeof(path), deeper, "deep.txt");
+  write_text_file(path, "deep\n");
+  char link_path[TERM_PATH_BUFFER];
+  join_test_path(link_path, sizeof(link_path), directory, "linked-dir");
+  symlink("nested", link_path);
+  join_test_path(link_path, sizeof(link_path), directory, "linked-file.txt");
+  join_test_path(path, sizeof(path), directory, "alpha.txt");
+  symlink(path, link_path);
+
+  CompletionResult result = {0};
+  char *prefix = NULL;
+  const char *line = "cat bet";
+  int scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int exact_prefix = scan == 0 && result.count == 1 && prefix &&
+                     !strcmp(prefix, "bet") &&
+                     !strcmp(result.items[0], "beta.txt");
+  report_test("C019", "filename completion", "ordinary prefix selects one filename",
+              line, "beta.txt with decoded prefix bet",
+              exact_prefix ? result.items[0] : "candidate or prefix differed",
+              exact_prefix, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat betX";
+  scan = completion_find(line, 7, directory, &result, &prefix);
+  char editable[64] = "cat betX";
+  size_t editable_length = strlen(editable);
+  size_t cursor = 7;
+  int middle_cursor = scan == 0 && result.count == 1 && prefix &&
+                      !strcmp(prefix, "bet") &&
+                      completion_insert_text(editable, sizeof(editable),
+                                             &editable_length, &cursor,
+                                             "a.txt") == 0 &&
+                      !strcmp(editable, "cat beta.txtX");
+  report_test("C020", "filename completion", "cursor in the middle preserves following characters",
+              "cat bet|X; insert .txt", "cat beta.txtX",
+              editable, middle_cursor, "Completion scans only up to the cursor.");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat|bet";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int pipe_boundary = scan == 0 && result.count == 1 && result.token_start == 4 &&
+                      !strcmp(prefix, "bet");
+  report_test("C021", "filename completion", "pipe operator starts a new word",
+              line, "token begins after | and prefix is bet",
+              pipe_boundary ? "operator boundary recognized" : "wrong token boundary",
+              pipe_boundary, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "echo done;bet";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int semicolon_boundary = scan == 0 && result.count == 1 &&
+                           result.token_start == strlen("echo done;") &&
+                           !strcmp(prefix, "bet");
+  report_test("C022", "filename completion", "semicolon operator starts a new word",
+              line, "prefix bet after semicolon", semicolon_boundary
+                       ? "operator boundary recognized" : "wrong token boundary",
+              semicolon_boundary, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat nested/in";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int nested_path = scan == 0 && result.count == 1 &&
+                    !strcmp(result.items[0], "nested/inside.txt");
+  report_test("C023", "filename completion", "nested directory prefix is retained",
+              line, "nested/inside.txt", nested_path ? result.items[0]
+                                                        : "nested entry missing",
+              nested_path, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat ./nested/in";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int dot_relative = scan == 0 && result.count == 1 &&
+                     !strcmp(result.items[0], "./nested/inside.txt");
+  report_test("C024", "filename completion", "./ relative path is completed",
+              line, "./nested/inside.txt", dot_relative ? result.items[0]
+                                                          : "relative entry missing",
+              dot_relative, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat ../alpha";
+  scan = completion_find(line, strlen(line), nested, &result, &prefix);
+  int parent_relative = scan == 0 && result.count == 1 &&
+                        !strcmp(result.items[0], "../alpha.txt");
+  report_test("C025", "filename completion", "../ path uses the active directory",
+              line, "../alpha.txt", parent_relative ? result.items[0]
+                                                     : "parent entry missing",
+              parent_relative, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat linked-dir/in";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int linked_directory = scan == 0 && result.count == 1 &&
+                         !strcmp(result.items[0], "linked-dir/inside.txt");
+  report_test("C026", "filename completion", "symlinked directory is traversed",
+              line, "linked-dir/inside.txt", linked_directory ? result.items[0]
+                                                               : "symlink directory missing",
+              linked_directory, "stat follows the directory symlink.");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat linked-file";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int linked_file = scan == 0 && result.count == 1 &&
+                    !strcmp(result.items[0], "linked-file.txt");
+  report_test("C027", "filename completion", "symlinked file is offered",
+              line, "linked-file.txt", linked_file ? result.items[0]
+                                                    : "symlink file missing",
+              linked_file, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat semi\\;c";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int escaped_operator = scan == 0 && result.count == 1 &&
+                         !strcmp(prefix, "semi;c") &&
+                         !strcmp(result.items[0], "semi;colon.txt");
+  report_test("C028", "filename completion", "escaped operator stays within the filename",
+              line, "semi;colon.txt", escaped_operator ? result.items[0]
+                                                        : "escaped name was split",
+              escaped_operator, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat 'quote";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  char *single_quoted_suffix = result.count
+                                   ? completion_encode_suffix(
+                                         result.items[0] + strlen(prefix),
+                                         result.quote)
+                                   : NULL;
+  int quote_name = scan == 0 && result.count == 1 &&
+                   !strcmp(result.items[0], "quote'file.txt") &&
+                   single_quoted_suffix &&
+                   !strcmp(single_quoted_suffix, "'\\''file.txt");
+  report_test("C029", "filename completion", "apostrophe filename completes inside an open quote",
+              line, "quote break and reopen the single-quoted string",
+              single_quoted_suffix ? single_quoted_suffix : "no candidate",
+              quote_name, "");
+  free(single_quoted_suffix);
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat semi;colon";
+  scan = completion_find(line, strlen("cat semi"), directory, &result, &prefix);
+  int suffix_cursor = scan == 0 && result.count == 1 &&
+                      !strcmp(result.items[0], "semi;colon.txt");
+  report_test("C030", "filename completion", "cursor before operator suffix sees the partial filename",
+              "cat semi|;colon", "matches semi;colon.txt using prefix semi",
+              suffix_cursor ? "candidate found" : "candidate missing",
+              suffix_cursor, "Text after the cursor is preserved by the GUI insert helper.");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat line";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int newline_skipped = scan == 0 && result.count == 0;
+  report_test("C031", "filename completion", "filename containing a newline is omitted",
+              line, "no unsafe multi-line candidate", newline_skipped
+                       ? "candidate omitted" : "newline filename was listed",
+              newline_skipped, "The shell editor accepts one command line at a time.");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat nested/";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int trailing_slash = scan == 0 && result.count == 2 &&
+                       !strcmp(result.items[0], "nested/deeper/") &&
+                       !strcmp(result.items[1], "nested/inside.txt");
+  report_test("C032", "filename completion", "trailing slash scans the selected directory",
+              line, "deep directory and file listed in sorted order",
+              trailing_slash ? "both children listed" : "children differed",
+              trailing_slash, "Directories retain a slash for continued completion.");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat beta";
+  scan = completion_find(line, strlen(line) + 20, directory, &result, &prefix);
+  int cursor_clamped = scan == 0 && result.count == 1 &&
+                       !strcmp(result.items[0], "beta.txt");
+  report_test("C033", "filename completion", "cursor beyond line end is clamped",
+              "cat beta; cursor=length+20", "beta.txt candidate", cursor_clamped
+                       ? "cursor clamped safely" : "unexpected result",
+              cursor_clamped, "");
+  free(prefix);
+  completion_free(&result);
+
+  line = "cat " ;
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int sorted = scan == 0 && result.count >= 8;
+  for (size_t i = 1; sorted && i < result.count; i++)
+    if (strcmp(result.items[i - 1], result.items[i]) > 0)
+      sorted = 0;
+  for (size_t i = 0; i < result.count; i++)
+    if (strchr(result.items[i], '\n') || result.items[i][0] == '.')
+      sorted = 0;
+  report_test("C034", "filename completion", "empty prefix lists visible candidates in order",
+              line, "non-hidden, single-line names sorted lexicographically",
+              sorted ? "candidates sorted and safe" : "candidate order or visibility differed",
+              sorted, "This is the list used by the multiple-match chooser.");
+  free(prefix);
+  completion_free(&result);
+
+  char *common_inputs[] = {"cat", "dog", "dot"};
+  char *common_empty = completion_common_prefix(common_inputs, 3);
+  char *common_single = completion_common_prefix(common_inputs, 1);
+  char *common_zero = completion_common_prefix(common_inputs, 0);
+  int common_edges = common_empty && !*common_empty && common_single &&
+                     !strcmp(common_single, "cat") && common_zero && !*common_zero;
+  report_test("C035", "filename completion", "common-prefix helper handles zero and one item",
+              "common prefix of {cat,dog,dot}, {cat}, and empty list",
+              "empty, cat, and empty strings", common_edges ? "all edge results match"
+                                                             : "a result differed",
+              common_edges, "");
+  free(common_empty);
+  free(common_single);
+  free(common_zero);
+
+  CompletionResult invalid_result = {(char **)1, 99, 99, 99, 'x'};
+  char *invalid_prefix = (char *)1;
+  errno = 0;
+  int invalid_arguments = completion_find(NULL, 0, directory, &invalid_result,
+                                          &invalid_prefix) < 0 && errno == EINVAL &&
+                          invalid_result.items == NULL &&
+                          invalid_result.count == 0 &&
+                          invalid_result.token_start == 0 &&
+                          invalid_prefix == NULL;
+  report_test("C036", "filename completion", "null command line is rejected",
+              "completion_find(NULL,...)", "returns -1 and sets EINVAL",
+              invalid_arguments ? "EINVAL" : "wrong return or errno",
+              invalid_arguments, "");
+  free(invalid_prefix);
+  completion_free(&invalid_result);
+
+  char invalid_line[16] = "abc";
+  size_t invalid_length = 3;
+  size_t invalid_cursor = 4;
+  errno = 0;
+  int invalid_insert = completion_insert_text(invalid_line, sizeof(invalid_line),
+                                             &invalid_length, &invalid_cursor,
+                                             "x") < 0 && errno == EINVAL &&
+                       !strcmp(invalid_line, "abc");
+  report_test("C037", "filename completion", "cursor past input length is rejected",
+              "insert at cursor 4 into a 3-byte line", "error with line unchanged",
+              invalid_insert ? "rejected without changing input" : "input changed",
+              invalid_insert, "");
+
+  char selected_line[32] = "ab";
+  size_t selected_length = 2;
+  size_t selected_cursor = 2;
+  char *one_choice[] = {"a"};
+  errno = 0;
+  int invalid_prefix_length = completion_select(
+                                  selected_line, sizeof(selected_line),
+                                  &selected_length, &selected_cursor, one_choice,
+                                  1, 1, 2, 0) < 0 && errno == EINVAL &&
+                              !strcmp(selected_line, "ab");
+  report_test("C038", "filename completion", "selection rejects longer prefix than candidate",
+              "choose a with two-byte prefix", "error without altering command",
+              invalid_prefix_length ? "selection rejected" : "selection changed input",
+              invalid_prefix_length, "");
+
+  line = "cat carriage";
+  scan = completion_find(line, strlen(line), directory, &result, &prefix);
+  int carriage_return_skipped = scan == 0 && result.count == 0;
+  report_test("C039", "filename completion", "filename containing CR is omitted",
+              line, "no candidate that shell tokenization would split",
+              carriage_return_skipped ? "candidate omitted" : "CR filename was listed",
+              carriage_return_skipped, "Carriage return is shell whitespace here.");
+  free(prefix);
+  completion_free(&result);
+}
+
+static void test_completion_prefix_matrix(void) {
+  char directory[TERM_PATH_BUFFER];
+  join_test_path(directory, sizeof(directory), test_root, "completion-edge");
+  const char *names[] = {"alpha.txt", "albatross", "beta.txt", "space file.txt",
+                         "semi;colon.txt", "quote'file.txt", "$cash.txt",
+                         ".hidden"};
+  int test_number = 40;
+  for (size_t name_index = 0; name_index < sizeof(names) / sizeof(names[0]);
+       name_index++) {
+    size_t name_length = strlen(names[name_index]);
+    size_t first_prefix = names[name_index][0] == '.' ? 1 : 0;
+    for (size_t prefix_length = first_prefix; prefix_length <= name_length;
+         prefix_length++) {
+      char decoded[TERM_PATH_BUFFER];
+      memcpy(decoded, names[name_index], prefix_length);
+      decoded[prefix_length] = '\0';
+      char *encoded = completion_encode_suffix(decoded, 0);
+      char command[TERM_PATH_BUFFER * 2];
+      snprintf(command, sizeof(command), "cat %s", encoded ? encoded : "");
+      CompletionResult result = {0};
+      char *actual_prefix = NULL;
+      int scan = encoded ? completion_find(command, strlen(command), directory,
+                                           &result, &actual_prefix)
+                         : -1;
+      int found_candidate = 0;
+      for (size_t i = 0; i < result.count; i++)
+        if (!strcmp(result.items[i], names[name_index]))
+          found_candidate = 1;
+      int prefix_ok = scan == 0 && found_candidate && actual_prefix &&
+                      !strcmp(actual_prefix, decoded);
+      char id[16];
+      snprintf(id, sizeof(id), "C%03d", test_number++);
+      char scenario[96];
+      snprintf(scenario, sizeof(scenario), "prefix length %zu of %s",
+               prefix_length, names[name_index]);
+      report_test(id, "filename completion", scenario,
+                  command, "candidate remains available and decoded prefix matches",
+                  prefix_ok ? "candidate found" : "candidate or prefix differed",
+                  prefix_ok,
+                  "Generated prefixes include spaces, quotes, operators, and expansion characters.");
+      free(encoded);
+      free(actual_prefix);
+      completion_free(&result);
+    }
+  }
 }
 
 static void test_scrollback(void) {
@@ -554,9 +1632,10 @@ static void test_hotkeys(void) {
       hotkeys_find_action(&config, XK_v, ControlMask | ShiftMask) == HOTKEY_PASTE &&
       hotkeys_find_action(&config, XK_c, ControlMask) == HOTKEY_INTERRUPT &&
       hotkeys_find_action(&config, XK_z, ControlMask) == HOTKEY_SUSPEND &&
-      hotkeys_find_action(&config, XK_t, ControlMask) == HOTKEY_NEW_TAB;
+      hotkeys_find_action(&config, XK_t, ControlMask) == HOTKEY_NEW_TAB &&
+      hotkeys_find_action(&config, XK_r, ControlMask) == HOTKEY_SEARCH_HISTORY;
   report_test("K001", "hotkeys", "assignment defaults are present",
-              "all 16 default actions", "every key maps to its required action",
+              "all configured default actions", "every key maps to its required action",
               defaults_ok ? "defaults match" : "one or more defaults differ",
               defaults_ok, "");
 
@@ -571,6 +1650,7 @@ static void test_hotkeys(void) {
   setenv("HOME", config_home, 1);
   write_text_file(config_path,
                   "# custom key\nmove_left = Alt+Left\nline_start = Ctrl+e\n"
+                  "search_history = Alt+R\n"
                   "unknown = F12\nline_end = NotARealKey\n");
   char warnings[1024];
   int load_result = hotkeys_load_user_config(&config, warnings, sizeof(warnings));
@@ -579,7 +1659,11 @@ static void test_hotkeys(void) {
                       HOTKEY_MOVE_LEFT &&
                   hotkeys_find_action(&config, XK_Left, 0) == HOTKEY_NONE &&
                   hotkeys_find_action(&config, XK_e, ControlMask) ==
-                      HOTKEY_LINE_END && contains(warnings, "unknown action") &&
+                      HOTKEY_LINE_END &&
+                  hotkeys_find_action(&config, XK_r, Mod1Mask) ==
+                      HOTKEY_SEARCH_HISTORY &&
+                  hotkeys_find_action(&config, XK_r, ControlMask) == HOTKEY_NONE &&
+                  contains(warnings, "unknown action") &&
                   contains(warnings, "invalid key binding");
   report_test("K002", "hotkeys", "custom key plus invalid entries and collision",
               "~/.terminatorrc with Alt+Left and conflicting Ctrl+E",
@@ -876,6 +1960,11 @@ static void worker_stop(TestWorker *worker) {
 }
 
 static SharedHistory *new_worker_history(int use_thread) {
+  char history_name[64];
+  snprintf(history_name, sizeof(history_name), "worker-history-%u",
+           history_test_number++);
+  if (set_test_history_path(history_name) < 0)
+    return NULL;
   int flags = MAP_SHARED | MAP_ANONYMOUS;
   SharedHistory *history = mmap(NULL, sizeof(*history), PROT_READ | PROT_WRITE,
                                 flags, -1, 0);
@@ -996,6 +2085,7 @@ static void test_worker_execution_mode(int use_thread) {
 }
 
 static void test_shell_features(void) {
+  set_test_history_path("history-shell");
   SharedHistory *history = calloc(1, sizeof(*history));
   if (!history || history_init(history, 0) < 0) {
     report_test("E001", "shell", "initialize execution context", "history",
@@ -1088,6 +2178,205 @@ static void test_shell_features(void) {
   join_test_path(output_file, sizeof(output_file), shell_directory,
                  "output.txt");
   write_text_file(input_file, "zeta\nalpha\n");
+
+  snprintf(redir, sizeof(redir), "less %s", input_file);
+  output = run_line(&shell, redir, &status);
+  int less_file_ok = status == 0 && output && !strcmp(output, "zeta\nalpha\n");
+  report_test("E030", "built-in less", "display a relative or absolute file",
+              redir, "file bytes appear in output", output ? output : "no output",
+              less_file_ok, "The output is kept in Terminator scrollback.");
+  free(output);
+
+  output = run_line(&shell,
+                    "/usr/bin/printf 'pipe-data\\n' | less", &status);
+  int less_pipe_ok = status == 0 && output && !strcmp(output, "pipe-data\n");
+  report_test("E031", "built-in less", "read piped standard input",
+              "printf pipe-data | less", "pipe-data reaches the viewer",
+              output ? output : "no output", less_pipe_ok,
+              "This works without a PTY because less copies stdin to stdout.");
+  free(output);
+
+  char second_input[256];
+  char empty_input[256];
+  join_test_path(second_input, sizeof(second_input), shell_directory,
+                 "second-less.txt");
+  join_test_path(empty_input, sizeof(empty_input), shell_directory,
+                 "empty-less.txt");
+  write_text_file(second_input, "second\n");
+  write_text_file(empty_input, "");
+  snprintf(redir, sizeof(redir), "less %s %s", input_file, second_input);
+  output = run_line(&shell, redir, &status);
+  int less_multiple_ok = status == 0 && output && contains(output, "zeta\n") &&
+                         contains(output, "second\n") &&
+                         contains(output, "==>");
+  report_test("E032", "built-in less", "display more than one file with headers",
+              "less file-one file-two", "both files and headers appear",
+              output ? output : "no output", less_multiple_ok, "");
+  free(output);
+
+  snprintf(redir, sizeof(redir), "less %s", empty_input);
+  output = run_line(&shell, redir, &status);
+  int less_empty_ok = status == 0 && output && !*output;
+  report_test("E033", "built-in less", "empty file is a successful empty display",
+              redir, "zero output and status 0", output ? output : "no output",
+              less_empty_ok, "");
+  free(output);
+
+  snprintf(redir, sizeof(redir), "less %s/missing-less.txt", shell_directory);
+  output = run_line(&shell, redir, &status);
+  int less_missing_ok = status != 0 && output && contains(output, "less:") &&
+                        contains(output, "missing-less.txt");
+  report_test("E034", "built-in less", "missing file reports an error",
+              redir, "nonzero status and file name in diagnostic",
+              output ? output : "no output", less_missing_ok, "");
+  free(output);
+
+  snprintf(redir, sizeof(redir), "less %s > %s", input_file, output_file);
+  output = run_line(&shell, redir, &status);
+  free(output);
+  char *less_redirect_contents = read_text_file(output_file);
+  int less_redirect_ok = status == 0 && less_redirect_contents &&
+                         !strcmp(less_redirect_contents, "zeta\nalpha\n");
+  report_test("E035", "built-in less", "file output redirection still works",
+              "less input.txt > output.txt", "viewer bytes are redirected to file",
+              less_redirect_contents ? less_redirect_contents : "file missing",
+              less_redirect_ok, "");
+  free(less_redirect_contents);
+
+  char large_input[TERM_PATH_BUFFER];
+  join_test_path(large_input, sizeof(large_input), shell_directory,
+                 "large-less.txt");
+  FILE *large_file = fopen(large_input, "w");
+  if (large_file) {
+    for (int i = 0; i < 5; i++)
+      for (int byte = 0; byte < 8192; byte++)
+        fputc('x', large_file);
+    fclose(large_file);
+  }
+  snprintf(redir, sizeof(redir), "less %s", large_input);
+  output = run_line(&shell, redir, &status);
+  int less_large_ok = status == 0 && output && strlen(output) == 40960;
+  report_test("E036", "built-in less", "stream output larger than one read buffer",
+              "display a 40 KiB file", "all bytes reach output",
+              output ? "captured output length checked" : "no output",
+              less_large_ok, "Exercises multiple read/write iterations.");
+  free(output);
+
+  output = run_line(&shell, "less --help", &status);
+  int less_help_ok = status == 0 && output && contains(output, "Usage: less") &&
+                     contains(output, "PageUp");
+  report_test("E037", "built-in less", "help documents scrollback controls",
+              "less --help", "usage and scrolling guidance are printed",
+              output ? output : "no output", less_help_ok, "");
+  free(output);
+
+  output = run_line(&shell, "/usr/bin/printf 'dash-input\\n' | less -", &status);
+  int less_dash_ok = status == 0 && output && !strcmp(output, "dash-input\n");
+  report_test("E038", "built-in less", "dash reads standard input",
+              "printf dash-input | less -", "stdin bytes are copied to stdout",
+              output ? output : "no output", less_dash_ok, "");
+  free(output);
+
+  snprintf(redir, sizeof(redir), "less < %s", input_file);
+  output = run_line(&shell, redir, &status);
+  int less_input_redirect_ok = status == 0 && output &&
+                               !strcmp(output, "zeta\nalpha\n");
+  report_test("E039", "built-in less", "input redirection supplies file contents",
+              redir, "input bytes appear in scrollback output",
+              output ? output : "no output", less_input_redirect_ok, "");
+  free(output);
+
+  char append_less[TERM_PATH_BUFFER];
+  join_test_path(append_less, sizeof(append_less), shell_directory,
+                 "append-less.txt");
+  write_text_file(append_less, "existing\n");
+  snprintf(redir, sizeof(redir), "less %s >> %s", input_file, append_less);
+  output = run_line(&shell, redir, &status);
+  free(output);
+  char *append_contents = read_text_file(append_less);
+  int less_append_ok = status == 0 && append_contents &&
+                       !strcmp(append_contents, "existing\nzeta\nalpha\n");
+  report_test("E040", "built-in less", "append redirection preserves earlier file contents",
+              "less input.txt >> append-less.txt",
+              "old bytes followed by viewer bytes",
+              append_contents ? append_contents : "output file missing",
+              less_append_ok, "");
+  free(append_contents);
+
+  snprintf(redir, sizeof(redir), "less %s %s/missing-middle %s",
+           input_file, shell_directory, second_input);
+  output = run_line(&shell, redir, &status);
+  int less_continue_after_error = status != 0 && output &&
+                                  contains(output, "zeta\n") &&
+                                  contains(output, "second\n") &&
+                                  contains(output, "missing-middle");
+  report_test("E041", "built-in less", "later files are still read after one file fails",
+              "less valid missing valid", "both valid contents plus an error",
+              output ? output : "no output", less_continue_after_error,
+              "A missing file reports failure but does not stop the remaining file list.");
+  free(output);
+
+  snprintf(redir, sizeof(redir), "less %s", shell_directory);
+  output = run_line(&shell, redir, &status);
+  int less_directory_error = status != 0 && output && contains(output, "less:");
+  report_test("E042", "built-in less", "directory read failure is reported",
+              redir, "nonzero status and less diagnostic",
+              output ? output : "no diagnostic", less_directory_error,
+              "Opening a directory may succeed; reading it fails on Linux.");
+  free(output);
+
+  char binary_input[TERM_PATH_BUFFER];
+  join_test_path(binary_input, sizeof(binary_input), shell_directory,
+                 "binary-less.bin");
+  int binary_fd = open(binary_input, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+  const unsigned char binary_bytes[] = {0, 1, 0xff, '\n', 'z'};
+  int binary_written = binary_fd >= 0 &&
+                       write(binary_fd, binary_bytes, sizeof(binary_bytes)) ==
+                           (ssize_t)sizeof(binary_bytes);
+  if (binary_fd >= 0)
+    close(binary_fd);
+  snprintf(redir, sizeof(redir), "less %s | /usr/bin/wc -c", binary_input);
+  output = run_line(&shell, redir, &status);
+  int binary_less_ok = binary_written && status == 0 && output &&
+                       atoi(output) == (int)sizeof(binary_bytes);
+  report_test("E043", "built-in less", "binary bytes are copied without string processing",
+              redir, "wc reports five bytes including NUL and 0xff",
+              output ? output : "no output", binary_less_ok,
+              "The test checks byte count because captured C strings cannot display NUL.");
+  free(output);
+
+  char megabyte_input[TERM_PATH_BUFFER];
+  join_test_path(megabyte_input, sizeof(megabyte_input), shell_directory,
+                 "megabyte-less.bin");
+  int megabyte_fd = open(megabyte_input, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+  char block[8192];
+  memset(block, 'm', sizeof(block));
+  int megabyte_written = megabyte_fd >= 0;
+  for (int block_index = 0; megabyte_written && block_index < 128;
+       block_index++)
+    megabyte_written = write_all(megabyte_fd, block, sizeof(block)) == 0;
+  if (megabyte_fd >= 0)
+    close(megabyte_fd);
+  snprintf(redir, sizeof(redir), "less %s | /usr/bin/wc -c", megabyte_input);
+  output = run_line(&shell, redir, &status);
+  int large_pipeline_ok = megabyte_written && status == 0 && output &&
+                          atoi(output) == 1024 * 1024;
+  report_test("E044", "built-in less / pipeline", "megabyte stream drains through a bounded pipe",
+              "less 1 MiB file | wc -c", "exactly 1,048,576 bytes reach wc",
+              output ? output : "no output", large_pipeline_ok,
+              "Reader and writer must make progress concurrently beyond pipe capacity.");
+  free(output);
+
+  snprintf(redir, sizeof(redir),
+           "/usr/bin/printf 'one\\ntwo\\n' | less | /usr/bin/tr a-z A-Z | /usr/bin/wc -l");
+  output = run_line(&shell, redir, &status);
+  int less_long_pipeline = status == 0 && output && atoi(output) == 2;
+  report_test("E045", "built-in less / pipeline", "less works in a four-stage pipeline",
+              "printf | less | tr | wc -l", "two lines reach the final command",
+              output ? output : "no output", less_long_pipeline,
+              "Checks that the viewer reads its pipe and forwards every line.");
+  free(output);
+
   snprintf(redir, sizeof(redir), "/bin/cat < %s | /usr/bin/sort > %s", input_file,
            output_file);
   output = run_line(&shell, redir, &status);
@@ -1154,10 +2443,19 @@ static void test_shell_features(void) {
   free(output);
 
   history_add(history, "history seed entry");
+  char history_value[64];
+  for (int i = 0; i < TERM_HISTORY_DISPLAY + 5; i++) {
+    snprintf(history_value, sizeof(history_value), "display-%04d", i);
+    history_add(history, history_value);
+  }
   output = run_line(&shell, "history", &status);
-  int history_builtin_ok = status == 0 && output && contains(output, "history");
-  report_test("E013", "built-in history", "history lists entered commands", "history",
-              "history output includes command", output ? output : "no output",
+  int history_builtin_ok = status == 0 && output &&
+                           count_occurrences(output, "\n") == TERM_HISTORY_DISPLAY &&
+                           contains(output, "display-1004") &&
+                           !contains(output, "history seed entry");
+  report_test("E013", "built-in history", "history displays only the newest 1,000 commands",
+              "history", "1,000 rows, including newest, without oldest seed",
+              output ? "history row count and newest command checked" : "no output",
               history_builtin_ok, "");
   free(output);
 
@@ -1473,6 +2771,268 @@ static void test_multiwatch_spacing_regression(void) {
   shell_pipeline_free(&pipeline);
 }
 
+static Window find_terminator_window(Display *display) {
+  Window root = DefaultRootWindow(display);
+  Window parent;
+  Window *children = NULL;
+  unsigned int child_count = 0;
+  if (!XQueryTree(display, root, &root, &parent, &children, &child_count))
+    return None;
+  Window found = None;
+  for (unsigned int i = 0; i < child_count; i++) {
+    char *title = NULL;
+    if (XFetchName(display, children[i], &title) && title) {
+      if (!strcmp(title, "Terminator"))
+        found = children[i];
+      XFree(title);
+    }
+    if (found != None)
+      break;
+  }
+  if (children)
+    XFree(children);
+  return found;
+}
+
+static int send_gui_key(Display *display, Window window, KeySym key,
+                        unsigned int modifiers) {
+  KeyCode code = XKeysymToKeycode(display, key);
+  if (!code)
+    return -1;
+  XEvent event = {0};
+  event.xkey.type = KeyPress;
+  event.xkey.display = display;
+  event.xkey.window = window;
+  event.xkey.root = DefaultRootWindow(display);
+  event.xkey.time = CurrentTime;
+  event.xkey.state = modifiers;
+  event.xkey.keycode = code;
+  event.xkey.same_screen = True;
+  int sent = XSendEvent(display, window, True, KeyPressMask, &event);
+  XFlush(display);
+  return sent ? 0 : -1;
+}
+
+static int send_gui_text(Display *display, Window window, const char *text) {
+  for (const unsigned char *character = (const unsigned char *)text; *character;
+       character++) {
+    KeySym key = *character;
+    unsigned int modifiers = 0;
+    if (*character >= 'A' && *character <= 'Z') {
+      key = *character - 'A' + XK_a;
+      modifiers = ShiftMask;
+    } else if (*character == '_') {
+      key = XK_minus;
+      modifiers = ShiftMask;
+    } else if (*character == ':') {
+      key = XK_semicolon;
+      modifiers = ShiftMask;
+    } else if (*character == '+') {
+      key = XK_equal;
+      modifiers = ShiftMask;
+    }
+    if (*character == ' ')
+      key = XK_space;
+    if (send_gui_key(display, window, key, modifiers) < 0)
+      return -1;
+  }
+  return 0;
+}
+
+static void wait_milliseconds(long milliseconds) {
+  struct timespec pause = {.tv_sec = milliseconds / 1000,
+                           .tv_nsec = (milliseconds % 1000) * 1000000};
+  nanosleep(&pause, NULL);
+}
+
+static int run_gui_feature_test(const char *mode_argument,
+                                const char *mode_name, int *completion_ok_out,
+                                int *search_ok_out) {
+  *completion_ok_out = 0;
+  *search_ok_out = 0;
+  char gui_directory[TERM_PATH_BUFFER];
+  char gui_home[TERM_PATH_BUFFER];
+  char unique_file[TERM_PATH_BUFFER];
+  char first_choice[TERM_PATH_BUFFER];
+  char second_choice[TERM_PATH_BUFFER];
+  char third_choice[TERM_PATH_BUFFER];
+  char history_path[TERM_PATH_BUFFER];
+  join_test_path(gui_directory, sizeof(gui_directory), test_root,
+                 "gui-working-directory");
+  join_test_path(gui_home, sizeof(gui_home), test_root, "gui-home");
+  mkdir(gui_directory, 0700);
+  mkdir(gui_home, 0700);
+  join_test_path(unique_file, sizeof(unique_file), gui_directory,
+                 "terminator-completion-unique.txt");
+  join_test_path(first_choice, sizeof(first_choice), gui_directory,
+                 "pick-alpha.txt");
+  join_test_path(second_choice, sizeof(second_choice), gui_directory,
+                 "pick-beta.txt");
+  join_test_path(third_choice, sizeof(third_choice), gui_directory,
+                 "pick-gamma.txt");
+  write_text_file(unique_file, "unique\n");
+  write_text_file(first_choice, "first\n");
+  write_text_file(second_choice, "second\n");
+  write_text_file(third_choice, "third\n");
+  if (set_test_history_path(mode_name) < 0)
+    return -1;
+  join_test_path(history_path, sizeof(history_path), test_root, mode_name);
+
+  const char *old_home = getenv("HOME");
+  char *saved_home = old_home ? strdup(old_home) : NULL;
+  setenv("HOME", gui_home, 1);
+  const char *binary = getenv("TERMINATOR_TEST_BINARY");
+  if (!binary || !*binary)
+    binary = "./terminator";
+  pid_t child = fork();
+  if (child == 0) {
+    if (mode_argument)
+      execl(binary, binary, mode_argument, (char *)NULL);
+    else
+      execl(binary, binary, (char *)NULL);
+    _exit(127);
+  }
+  if (saved_home) {
+    setenv("HOME", saved_home, 1);
+    free(saved_home);
+  } else {
+    unsetenv("HOME");
+  }
+  if (child < 0)
+    return -1;
+
+  Display *display = XOpenDisplay(NULL);
+  if (!display) {
+    kill(child, SIGTERM);
+    waitpid(child, NULL, 0);
+    return -1;
+  }
+  Window window = None;
+  for (int tries = 0; tries < 50 && window == None; tries++) {
+    window = find_terminator_window(display);
+    if (window == None)
+      wait_milliseconds(50);
+  }
+
+  int result = 0;
+  if (window == None || send_gui_text(display, window, "cd ") < 0 ||
+      send_gui_text(display, window, gui_directory) < 0 ||
+      send_gui_key(display, window, XK_Return, 0) < 0) {
+    result = -1;
+  } else {
+    wait_milliseconds(250);
+    if (send_gui_text(display, window, "cat terminator-completion-uniq") < 0 ||
+        send_gui_key(display, window, XK_Tab, 0) < 0 ||
+        send_gui_key(display, window, XK_Return, 0) < 0) {
+      result = -1;
+    } else {
+      wait_milliseconds(250);
+      if (send_gui_text(display, window, "cat pick-") < 0 ||
+          send_gui_key(display, window, XK_Tab, 0) < 0 ||
+          send_gui_text(display, window, "9") < 0 ||
+          send_gui_key(display, window, XK_Return, 0) < 0 ||
+          send_gui_key(display, window, XK_BackSpace, 0) < 0) {
+        result = -1;
+      } else {
+        if (send_gui_text(display, window, "3") < 0 ||
+            send_gui_key(display, window, XK_Return, 0) < 0 ||
+            send_gui_key(display, window, XK_Return, 0) < 0)
+          result = -1;
+        wait_milliseconds(300);
+        if (result == 0 &&
+            (send_gui_text(display, window, "cat no-such-prefix") < 0 ||
+             send_gui_key(display, window, XK_Tab, 0) < 0 ||
+             send_gui_key(display, window, XK_Return, 0) < 0))
+          result = -1;
+        wait_milliseconds(300);
+      }
+    }
+  }
+
+  char *history_text = read_text_file(history_path);
+  char expected_cd[TERM_PATH_BUFFER + 8];
+  snprintf(expected_cd, sizeof(expected_cd), "cd %s\n", gui_directory);
+  int history_ok = history_text && contains(history_text, expected_cd) &&
+                   contains(history_text, "cat terminator-completion-unique.txt\n") &&
+                   contains(history_text, "cat pick-gamma.txt\n") &&
+                   contains(history_text, "cat no-such-prefix\n");
+  int no_search_command = history_text &&
+                          !contains(history_text, "\npick-gamma.txt\n");
+  if (!history_ok || !no_search_command)
+    fprintf(stderr, "GUI completion history mismatch (%s):\n%s\n",
+            mode_name, history_text ? history_text : "<history unavailable>");
+  if (result == 0 && (!history_ok || !no_search_command))
+    result = -1;
+  *completion_ok_out = result == 0;
+
+  if (result == 0) {
+    if (send_gui_key(display, window, XK_r, ControlMask) < 0 ||
+        send_gui_text(display, window, "pick-gamma.txt") < 0 ||
+        send_gui_key(display, window, XK_Return, 0) < 0)
+      result = -1;
+    else
+      wait_milliseconds(200);
+  }
+  if (result == 0 &&
+      (send_gui_key(display, window, XK_r, ControlMask) < 0 ||
+       send_gui_text(display, window, "pick-gama") < 0 ||
+       send_gui_key(display, window, XK_Return, 0) < 0))
+    result = -1;
+  wait_milliseconds(150);
+  if (result == 0 &&
+      (send_gui_key(display, window, XK_r, ControlMask) < 0 ||
+       send_gui_text(display, window, "no-such-history-term") < 0 ||
+       send_gui_key(display, window, XK_Return, 0) < 0))
+    result = -1;
+  wait_milliseconds(150);
+  if (result == 0 &&
+      (send_gui_key(display, window, XK_r, ControlMask) < 0 ||
+       send_gui_text(display, window, "cancel-this-search") < 0 ||
+       send_gui_key(display, window, XK_Escape, 0) < 0 ||
+       send_gui_text(display, window, "/usr/bin/printf gui-after-escape") < 0 ||
+       send_gui_key(display, window, XK_Return, 0) < 0))
+    result = -1;
+  wait_milliseconds(300);
+  free(history_text);
+  history_text = read_text_file(history_path);
+  int search_not_submitted = history_text &&
+                             count_occurrences(history_text,
+                                               "pick-gamma.txt\n") == 1 &&
+                             !contains(history_text, "\npick-gamma.txt\n") &&
+                             contains(history_text,
+                                      "/usr/bin/printf gui-after-escape\n") &&
+                             !contains(history_text, "pick-gama\n") &&
+                             !contains(history_text, "no-such-history-term\n") &&
+                             !contains(history_text, "cancel-this-search\n");
+  if (!search_not_submitted)
+    fprintf(stderr, "GUI search history mismatch (%s):\n%s\n",
+            mode_name, history_text ? history_text : "<history unavailable>");
+  if (result == 0 && !search_not_submitted)
+    result = -1;
+  *search_ok_out = result == 0;
+  free(history_text);
+
+  XCloseDisplay(display);
+  kill(child, SIGTERM);
+  int finished = 0;
+  int status = 0;
+  for (int tries = 0; tries < 20; tries++) {
+    if (waitpid(child, &status, WNOHANG) == child) {
+      finished = 1;
+      break;
+    }
+    wait_milliseconds(50);
+  }
+  if (!finished) {
+    kill(child, SIGKILL);
+    waitpid(child, &status, 0);
+    finished = 1;
+  }
+  if (result == 0 && (!finished || !WIFEXITED(status) || WEXITSTATUS(status) != 0))
+    result = -1;
+  return result;
+}
+
 static int run_gui_smoke(const char *mode_argument) {
   const char *binary = getenv("TERMINATOR_TEST_BINARY");
   if (!binary || !*binary)
@@ -1522,6 +3082,11 @@ static void run_selected(const char *selection) {
   if (all || !strcmp(selection, "unit")) {
     test_parser();
     test_history();
+    test_history_edges();
+    test_history_search_matrix();
+    test_completion();
+    test_completion_edges();
+    test_completion_prefix_matrix();
     test_scrollback();
     test_hotkeys();
   }
@@ -1544,9 +3109,33 @@ static void run_selected(const char *selection) {
                   "make terminator", "application builds and opens",
                   "application build failed", 0,
                   "The core build failed before the GUI smoke test could run.");
+      report_test("G003", "filename completion",
+                  "thread-mode typing and numbered choice", "make terminator",
+                  "GUI completion interaction runs", "application build failed",
+                  0, "The core build failed before GUI input could be tested.");
+      report_test("G004", "history search", "thread-mode Ctrl+R search",
+                  "make terminator", "GUI history search runs",
+                  "application build failed", 0,
+                  "The core build failed before GUI input could be tested.");
+      report_test("G103", "filename completion",
+                  "process-mode typing and numbered choice", "make terminator",
+                  "GUI completion interaction runs", "application build failed",
+                  0, "The core build failed before GUI input could be tested.");
+      report_test("G104", "history search", "process-mode Ctrl+R search",
+                  "make terminator", "GUI history search runs",
+                  "application build failed", 0,
+                  "The core build failed before GUI input could be tested.");
     } else if (!getenv("DISPLAY")) {
       report_skip("G001", "X11 GUI", "thread-mode startup", "DISPLAY is not set");
       report_skip("G002", "X11 GUI", "process-mode startup", "DISPLAY is not set");
+      report_skip("G003", "filename completion", "thread-mode typing and numbered choice",
+                  "DISPLAY is not set");
+      report_skip("G004", "history search", "thread-mode Ctrl+R search",
+                  "DISPLAY is not set");
+      report_skip("G103", "filename completion", "process-mode typing and numbered choice",
+                  "DISPLAY is not set");
+      report_skip("G104", "history search", "process-mode Ctrl+R search",
+                  "DISPLAY is not set");
     } else {
       int result = run_gui_smoke(NULL);
       report_test("G001", "X11 GUI", "thread-mode application startup", "./terminator",
@@ -1558,6 +3147,42 @@ static void run_selected(const char *selection) {
                   "./terminator useProcess=True", "window stays alive until SIGTERM",
                   result == 0 ? "started and stopped cleanly" : "startup failed or timed out",
                   result == 0, "Headless X11 smoke test; it does not inspect pixels.");
+      int completion_ok = 0;
+      int search_ok = 0;
+      result = run_gui_feature_test(NULL, "gui-thread-history",
+                                    &completion_ok, &search_ok);
+      report_test("G003", "filename completion",
+                  "thread-mode typing, unique completion, and numbered choice",
+                  "type with Tab; reject 9; erase it; choose 3; try a no-match Tab",
+                  "completed commands are submitted exactly once",
+                  completion_ok ? "unique and selected candidates were submitted"
+                                : "GUI completion interaction failed",
+                  completion_ok,
+                  "Uses XSendEvent through Xvfb; checks persisted commands.");
+      report_test("G004", "history search", "thread-mode exact/fallback/no-match and cancel paths",
+                  "Ctrl+R exact term; Ctrl+R typo; Ctrl+R missing term; Escape",
+                  "search text is not recorded as a command",
+                  search_ok ? "history unchanged by search query"
+                            : "history search interaction failed",
+                  search_ok,
+                  "Exercises the GUI prompt mode and persistent history file.");
+      result = run_gui_feature_test("useProcess=True", "gui-process-history",
+                                    &completion_ok, &search_ok);
+      report_test("G103", "filename completion",
+                  "process-mode typing, unique completion, and numbered choice",
+                  "type with Tab; reject 9; erase it; choose 3; try a no-match Tab",
+                  "completed commands are submitted exactly once",
+                  completion_ok ? "unique and selected candidates were submitted"
+                                : "GUI completion interaction failed",
+                  completion_ok,
+                  "Uses XSendEvent through Xvfb; checks persisted commands.");
+      report_test("G104", "history search", "process-mode exact/fallback/no-match and cancel paths",
+                  "Ctrl+R exact term; Ctrl+R typo; Ctrl+R missing term; Escape",
+                  "search text is not recorded as a command",
+                  search_ok ? "history unchanged by search query"
+                            : "history search interaction failed",
+                  search_ok,
+                  "Exercises the GUI prompt mode and persistent history file.");
     }
   }
 }
