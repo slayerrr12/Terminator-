@@ -14,6 +14,7 @@ include/
   shell.h            Shell state, parsed commands, and job structures
   scrollback.h       Per-tab scrollback and viewport interface
   hotkeys.h          Configurable key-binding interface
+  completion.h       Filename completion interface
 src/
   main.c             Startup, execution-mode selection, and shutdown
   gui.c              X11 window, keyboard input, drawing, and event loop
@@ -22,10 +23,11 @@ src/
   parser.c           Input completeness, tokenizing, parsing, and expansion
   executor.c         Redirection, pipelines, processes, and job control
   multiwatch.c       Concurrent command supervisor for multiWatch
-  history.c          Shared in-memory command history
+  history.c          Persistent shared history and search
   scrollback.c       Bounded per-tab output history and scrolling behavior
   selection.c        Text selection and X11 clipboard handling
   hotkeys.c          Default keys and ~/.terminatorrc configuration
+  completion.c       Filename matching and input-line insertion
 docs/                This guide, design notes, architecture, and roadmap
 Makefile             Build, run, and clean commands
 README.md            Dependencies, build instructions, features, and limits
@@ -65,9 +67,11 @@ Every tab has a shell worker. The worker mode changes how the worker is
 started, but both modes use the same shell code.
 
 - In **thread mode**, the GUI and each tab worker are threads in one process.
-  The threads share the in-memory history ring.
-- In **process mode**, the GUI forks a worker process for each tab. History is
-  placed in shared memory so the separate processes can use the same ring.
+  The threads share a small history coordination structure and one history
+  file.
+- In **process mode**, the GUI forks a worker process for each tab. Workers
+  share the coordination structure in shared memory and use a lock file to
+  coordinate updates to the same persistent history file.
 - Each tab has a command pipe from the GUI to its worker, an output pipe from
   the worker to the GUI, and a status pipe from the worker to the GUI.
 - The GUI polls its X11 connection and all worker output/status pipes. It sleeps
@@ -177,8 +181,10 @@ child prints an error to the tab output. The worker remains available for the
 next command.
 
 The current built-ins are `cd`, `clear`, `exit`, `history`, `source`,
-`multiWatch`, `jobs`, `fg`, and `bg`. The shell saves the last command's exit
-status in `ShellContext.last_status`; `$?` expands to that value.
+`multiWatch`, `jobs`, `fg`, `bg`, and `less`. The shell saves the last
+command's exit status in `ShellContext.last_status`; `$?` expands to that
+value. `less` copies files or piped input into scrollback; it does not open a
+full-screen pager because the application has no PTY.
 
 ### Where is the code for this?
 
@@ -386,21 +392,78 @@ Linux terminal.
 
 ## Task 9: searchable persistent history
 
-`src/history.c` stores up to 1,024 commands in a shared in-memory ring. A
-semaphore protects reads and writes in both execution modes. The `history`
-built-in prints the saved entries, and Up/Down retrieve recent entries for the
-active input line. Page Up/Page Down and the mouse wheel control output
-scrollback separately.
+### Implementation details
 
-The assignment's persistent 10,000-command file and Ctrl+R search are not
-implemented.
+Commands are saved to `~/.terminator_history` by default. Set
+`TERMINATOR_HISTORY_FILE` to use another path. This keeps the application from
+overwriting the user's Bash history and gives tests a private history file.
+The file keeps the latest 10,000 commands; the `history` built-in prints the
+latest 1,000. Newline, carriage return, and backslash bytes are escaped so each
+command occupies one physical line. A semaphore coordinates tabs in one
+application, and a sidecar lock file coordinates separate Terminator
+processes.
+
+Press **Ctrl+R**, type a term, and press Enter. The GUI first displays every
+command containing that exact text. If there are no exact hits, it finds the
+longest common substring between the term and each command. If the best
+substring is longer than two characters, all commands tied for that longest
+match are displayed. Otherwise it prints `No match for search term in
+history`.
+
+### Where is the code for this?
+
+- `src/history.c`: file creation, escaping, 10,000-row retention, locking,
+  snapshots, and search.
+- `src/shell.c`: `builtin_history()` displays at most 1,000 newest rows.
+- `src/gui.c`: Ctrl+R prompt mode, result display, and the no-match message.
+- `src/hotkeys.c`, `include/hotkeys.h`, and `docs/terminatorrc.example`:
+  configurable `search_history` action, with Ctrl+R as the default.
+- `include/terminator.h`: `SharedHistory` stores the semaphore, file path,
+  and cached metadata; command records live on disk.
+
+### Explanation of the important code
+
+`history_add()` encodes special line bytes, then takes the semaphore and the
+lock file before appending. Once more than 10,000 records are present, it
+copies the newest 10,000 rows to a temporary file and replaces the old file.
+`history_search()` checks exact text first. Only when there are no exact hits
+does it use a suffix automaton to find the longest shared substring without
+comparing every character pair quadratically.
+
+The GUI uses a separate search buffer, so Enter displays matches instead of
+running the search term as a shell command.
 
 ## Task 10: file-name auto-completion
 
-File-name completion is not implemented. Pressing Tab does not scan the
-working directory or change the input line. The relevant UI state is the
-active tab's `input_buffer`, `input_cursor`, and `working_directory` in
-`include/terminator.h`.
+### Implementation details
+
+Press **Tab** to complete the word before the input cursor. The search uses the
+active tab's `working_directory`. One match inserts the rest of the name.
+Several matches insert only the longest common prefix, print a sorted numbered
+list, and wait for a number followed by Enter. No match leaves the command line
+unchanged. Text after the cursor stays in place, quotes and escaped spaces are
+preserved, and directories receive a trailing slash.
+
+### Where is the code for this?
+
+- `src/completion.c`: scans filenames, decodes the current token, finds a
+  common prefix, escapes the missing suffix, inserts text, and applies a
+  numbered choice.
+- `include/completion.h`: interface between the completion helpers and GUI.
+- `src/gui.c`: handles Tab, lists candidates, accepts a choice, and updates
+  the input buffer.
+- `include/terminator.h`: each `Tab` owns its cursor, candidate list, and
+  temporary chooser state.
+
+### Explanation of the important code
+
+`completion_find()` scans input only up to the cursor, decodes the token's
+quotes and backslash escapes, and searches the matching directory portion.
+The GUI uses `completion_common_prefix()` to insert only the shared suffix. If
+there are multiple choices, `completion_select()` inserts the selected name's
+remaining suffix at the saved cursor and leaves following input in place.
+Names containing newline or carriage return are skipped because the shell
+uses those bytes as input separators.
 
 ## Task 11: custom Bash-subset script interpreter
 
@@ -415,10 +478,9 @@ script. The custom interpreter task remains future work.
 - The command language is a subset of Bash.
 - The window is not backed by a PTY and does not support full-screen
   interactive applications.
-- History is shared between tabs but exists only in memory and holds at most
-  1,024 entries.
-- History search, file-name completion, and the custom script interpreter
-  belong to later assignment tasks and remain unfinished.
+- Task 11's custom script interpreter remains unfinished. `source` sends
+  complete lines through the existing shell parser but does not implement the
+  assignment's script language.
 
 See [architecture.md](architecture.md) for module responsibilities,
 [design.md](design.md) for implementation choices, and

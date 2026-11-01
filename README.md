@@ -52,7 +52,13 @@ observed result, and any failure makes the target return nonzero. Use
 - Press **Ctrl+D** on an empty command line to close the current tab.
 - Press **Ctrl+C** to interrupt the selected tab's foreground job and **Ctrl+Z**
   to stop it.
-- Use **Up** and **Down** to browse the shared command history. Use **Page
+- Use **Up** and **Down** to browse the shared command history. Press **Ctrl+R**
+  to search it. Type a term and press Enter: exact matches are shown first; if
+  there are none, commands tied for the longest shared substring are shown.
+- Press **Tab** to complete the filename before the cursor using the active
+  tab's working directory. One match completes directly. Multiple matches
+  complete the shared prefix, list the choices, and wait for a number and Enter.
+- Use **Page
   Up/Page Down** or the mouse wheel to scroll output. Each tab keeps up to
   10,000 output lines within a 1 MiB scrollback budget.
 - Use **Ctrl+Shift+C/V** to copy selected output and paste text into the input.
@@ -65,7 +71,7 @@ observed result, and any failure makes the target return nonzero. Use
 - Thread mode and process mode, with shared command history protected by a
   semaphore.
 - Built-in commands: `cd`, `clear`, `exit`, `history`, `source`, `multiWatch`,
-  `jobs`, `fg`, and `bg`.
+  `jobs`, `fg`, `bg`, and `less`.
 - External commands launched with `fork()` and `execvp()`.
 - Multiline input, single and double quotes, environment variables, `$?`,
   nested and multiline `$()` and backtick substitutions, and wildcard expansion.
@@ -73,6 +79,14 @@ observed result, and any failure makes the target return nonzero. Use
 - Background jobs with basic `jobs`, `fg`, `bg`, Ctrl+C, and Ctrl+Z support.
 - `multiWatch` runs commands concurrently and collects their output without
   busy-waiting.
+- Persistent shared command history keeps the latest 10,000 commands on disk;
+  `history` prints at most the latest 1,000. The default file is
+  `~/.terminator_history`; set `TERMINATOR_HISTORY_FILE` to choose another path.
+- `less FILE` copies file contents into Terminator's scrollback. It can also
+  read standard input through a pipe or redirection. Because the app has no
+  PTY, this is a simple scrollback viewer rather than a full-screen pager.
+- Tab filename completion searches the current tab's directory, respects
+  quotes and escaped characters, and preserves input after the cursor.
 - Persistent configurable editing hotkeys read from `~/.terminatorrc`.
 
 ## Change hotkeys
@@ -99,12 +113,10 @@ specification.
 
 Terminator implements a shell subset. It is not a full Bash implementation and
 does not use a PTY, so full-screen programs and programs that depend on normal
-terminal control sequences are not supported. The current history is shared
-and kept in memory, with a limit of 1,024 commands; it is not saved between
-runs.
+terminal control sequences are not supported. History is stored in a
+Terminator-specific file so the application does not overwrite Bash's history.
 
-Command-history search, filename completion, and the custom Bash-subset script
-interpreter are later assignment tasks and are not implemented. `source`
+The custom Bash-subset script interpreter remains unimplemented. `source`
 executes complete input lines using Terminator's existing shell parser; it does
 not provide that custom interpreter. See [docs/roadmap.md](docs/roadmap.md) for
 task status and remaining work.

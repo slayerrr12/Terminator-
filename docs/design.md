@@ -40,9 +40,36 @@ status, and job table. The GUI's process directory is not changed by `cd`.
 External commands run in child processes and call `chdir()` to the tab's
 working directory before execution.
 
-`SharedHistory` is a fixed-size ring with 1,024 entries. The same unnamed POSIX
-semaphore protects history reads and writes in both modes. In process mode,
-the semaphore is initialized with process sharing enabled.
+`SharedHistory` contains a semaphore, the selected history-file path, and
+cached file metadata. Commands are written to `~/.terminator_history` by
+default; setting `TERMINATOR_HISTORY_FILE` selects another file. The newest
+10,000 commands are retained, and `history` displays at most the newest 1,000.
+The semaphore coordinates tabs within one application. A sidecar lock file
+uses `flock()` to coordinate separate application processes. In process mode,
+the small coordination structure is in shared memory and the history records
+remain in the file.
+
+Ctrl+R switches the GUI input to a search prompt. On Enter, the history module
+prints every command containing the term. If there is no exact occurrence, it
+prints every command tied for the longest shared substring when that substring
+has more than two bytes. A missing or too-short match prints the required
+no-match message.
+
+## Filename completion and `less`
+
+`completion.c` scans the active tab's logical working directory for names
+matching the word before the cursor. It decodes quotes and backslash escapes
+while matching, then encodes only the missing suffix for the current quote
+style. Directories receive a trailing slash. Multiple candidates are sorted;
+the GUI inserts their common prefix and presents a numbered chooser. The
+insertion routine leaves text after the cursor in place. Names containing
+newline or carriage return are omitted because the shell treats those bytes as
+input separators.
+
+The `less` built-in streams file bytes or standard input to its output file
+descriptor. In the GUI, that output flows into the tab's scrollback buffer, so
+Page Up, Page Down, and the mouse wheel provide navigation. It does not enter a
+full-screen mode because the application has no PTY.
 
 ## Parsing and expansion
 
@@ -100,12 +127,8 @@ is in `docs/terminatorrc.example`.
 
 ## Current limits
 
-- History is shared between tabs but is only stored in memory. It keeps at
-  most 1,024 commands and is cleared when the application exits.
 - `source` executes complete input lines with the current shell parser. It is
-  not the custom Bash-subset script interpreter in the assignment.
-- History search and filename completion belong to later assignment tasks and
-  are not implemented.
+  not the custom Bash-subset script interpreter in Task 11.
 - Background jobs use process groups and signals, but there is no PTY to
   provide full interactive terminal job control.
 

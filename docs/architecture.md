@@ -10,8 +10,9 @@ include/
   scrollback.h   Per-tab scrollback buffer and scrolling interface
   selection.h    Text selection and clipboard interface
   hotkeys.h      Configurable key-binding interface
+  completion.h   Filename completion interface
 src/
-  main.c         Startup, mode selection, shared history, and shutdown
+  main.c         Startup, mode selection, history setup, and shutdown
   gui.c          X11 window, keyboard input, drawing, and event loop
   selection.c    Mouse text selection and X11 clipboard handling
   tab.c          Per-tab pipes and worker thread/process lifecycle
@@ -19,9 +20,10 @@ src/
   parser.c       Input completeness, tokenizing, parsing, and expansion
   executor.c     Redirection, pipelines, child processes, and jobs
   multiwatch.c   Concurrent command supervisor for multiWatch
-  history.c      Shared in-memory command history
+  history.c      Persistent shared command history and search
   scrollback.c   Bounded per-tab output history and viewport tracking
   hotkeys.c      Default hotkeys and ~/.terminatorrc loading
+  completion.c   Current-directory filename matching and input insertion
 docs/            Task guide, architecture, design, and roadmap
 ```
 
@@ -42,7 +44,8 @@ flowchart LR
 2. `tab.c` connects the GUI and worker with three pipes: one for commands, one
    for command output, and one for command status and the tab's working
    directory.
-3. `shell.c` reads commands and keeps the state for that tab.
+3. `shell.c` reads commands, keeps the state for that tab, and implements
+   built-ins such as `cd`, `history`, and `less`.
 4. `parser.c` turns the input into a `Pipeline` containing one or more
    `SimpleCommand` values.
 5. `executor.c` applies redirection, creates pipeline processes, and waits for
@@ -67,19 +70,36 @@ tab's shell worker is started:
 - **Thread mode** is the default. `tab.c` starts one POSIX thread per tab. The
   threads share the process's history object.
 - **Process mode** is selected with `./terminator useProcess=True`. `tab.c`
-  forks one worker process per tab. History is stored in shared memory so the
-  workers and GUI can access the same ring.
+  forks one worker process per tab. Workers share a small history-coordination
+  structure in memory and read/write the same persistent history file.
 
 In either mode, a worker owns a `ShellContext`. It contains the tab's logical
 working directory, last command status, and job table. A `cd` changes this
 context rather than the GUI process's current directory, so tabs keep separate
 working directories.
 
-## Shared history and signals
+## Shared history, search, completion, and signals
 
-`history.c` stores up to 1,024 commands in a ring. One unnamed POSIX semaphore
-protects both updates and snapshots. It is initialized for threads in thread
-mode and as process-shared in process mode.
+`history.c` stores commands in `~/.terminator_history` by default. Set
+`TERMINATOR_HISTORY_FILE` to use another path. A semaphore protects threads
+inside one application, and a sidecar lock file coordinates separate
+Terminator processes. The file keeps the newest 10,000 commands; the `history`
+built-in prints the newest 1,000. The GUI's Ctrl+R mode shows exact matches, or
+the commands tied for the longest shared substring when there is no exact
+match.
+
+`completion.c` finds the word before the active tab's cursor and scans the
+tab's logical working directory. One match is inserted. Multiple matches
+insert their common prefix and display a numbered list. The GUI keeps text
+after the cursor in place and lets the user select a candidate by number.
+
+The `less` built-in copies files or standard input to its output stream, which
+the GUI adds to that tab's scrollback. It is a simple viewer because the
+application does not have a PTY for full-screen pager controls.
+
+`include/terminator.h` defines `SharedHistory` as the lock, history-file path,
+and cached file metadata. Command records live on disk; the small coordination
+structure is shared with workers in process mode.
 
 Each tab also has a shared foreground process-group ID. The GUI uses it to send
 Ctrl+C or Ctrl+Z to the active tab's foreground job. The worker remains alive
