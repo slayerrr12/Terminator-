@@ -55,8 +55,9 @@ observed result, and any failure makes the target return nonzero. Use
 ## Using the window
 
 - Press **Ctrl+T** or click **[+]** to open a tab.
-- Click a tab number to switch tabs. A tab's worker continues while another tab
-  is selected.
+- Each tab shows its `user@host:~/path` location. Click a tab to switch to it;
+  hover over it to reveal the small **×** close button. A tab's worker continues
+  while another tab is selected.
 - Press **Ctrl+D** on an empty command line to close the current tab.
 - Press **Ctrl+C** to interrupt the selected tab's foreground job and **Ctrl+Z**
   to stop it.

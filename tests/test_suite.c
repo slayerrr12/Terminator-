@@ -3862,6 +3862,38 @@ static int send_gui_button(Display *display, Window window, int x, int y,
   return sent ? 0 : -1;
 }
 
+static int send_gui_motion(Display *display, Window window, int x, int y) {
+  XEvent event = {0};
+  event.xmotion.type = MotionNotify;
+  event.xmotion.display = display;
+  event.xmotion.window = window;
+  event.xmotion.root = DefaultRootWindow(display);
+  event.xmotion.time = CurrentTime;
+  event.xmotion.x = x;
+  event.xmotion.y = y;
+  event.xmotion.same_screen = True;
+  int sent = XSendEvent(display, window, True, PointerMotionMask, &event);
+  XFlush(display);
+  return sent ? 0 : -1;
+}
+
+static unsigned long gui_header_hash(Display *display, Window window) {
+  XWindowAttributes attributes;
+  if (!XGetWindowAttributes(display, window, &attributes) ||
+      attributes.width <= 0)
+    return 0;
+  XImage *image = XGetImage(display, window, 0, 0,
+                            (unsigned)attributes.width, 34, AllPlanes, ZPixmap);
+  if (!image)
+    return 0;
+  unsigned long hash = 5381;
+  for (int y = 0; y < 34; y++)
+    for (int x = 0; x < attributes.width; x++)
+      hash = hash * 33 + XGetPixel(image, x, y);
+  XDestroyImage(image);
+  return hash;
+}
+
 static int gui_command_was_saved(const char *history_path,
                                  const char *command) {
   char *history = read_text_file(history_path);
@@ -3875,15 +3907,18 @@ static int test_gui_tab_switching(Display *display, Window window,
   if (send_gui_key(display, window, XK_t, ControlMask) < 0)
     return -1;
   wait_milliseconds(150);
+  unsigned long before_cd = gui_header_hash(display, window);
   if (send_gui_text(display, window, "cd /tmp") < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
   wait_milliseconds(150);
+  unsigned long after_cd = gui_header_hash(display, window);
   if (send_gui_text(display, window, "/usr/bin/pwd") < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
   wait_milliseconds(250);
-  int second_tab_ok = gui_find_text_line(display, window, "/tmp", -1) >= 0;
+  int second_tab_ok = gui_find_text_line(display, window, "/tmp", -1) >= 0 &&
+                      before_cd && after_cd && before_cd != after_cd;
 
   if (send_gui_button(display, window, 50, 20, Button1) < 0 ||
       send_gui_text(display, window, "/usr/bin/pwd") < 0 ||
@@ -3893,8 +3928,23 @@ static int test_gui_tab_switching(Display *display, Window window,
   int first_tab_ok =
       gui_find_text_line(display, window, working_directory, -1) >= 0;
 
-  if (send_gui_button(display, window, 220, 20, Button1) < 0 ||
-      send_gui_key(display, window, XK_d, ControlMask) < 0)
+  XWindowAttributes attributes;
+  if (!XGetWindowAttributes(display, window, &attributes))
+    return -1;
+  int tab_width = (attributes.width - 56) / 2;
+  if (tab_width > 180)
+    tab_width = 180;
+  if (tab_width < 1)
+    return -1;
+  int close_x = 8 + tab_width + tab_width - 13;
+  unsigned long before_hover = gui_header_hash(display, window);
+  if (send_gui_motion(display, window, close_x, 20) < 0)
+    return -1;
+  wait_milliseconds(50);
+  unsigned long after_hover = gui_header_hash(display, window);
+  if (!before_hover || !after_hover || before_hover == after_hover)
+    return -1;
+  if (send_gui_button(display, window, close_x, 20, Button1) < 0)
     return -1;
   wait_milliseconds(200);
   return first_tab_ok && second_tab_ok ? 0 : -1;
@@ -4469,7 +4519,7 @@ static void run_selected(const char *selection) {
                   "clipboard rejects UTF8_STRING", "paste retries with XA_STRING",
                   "application build failed", 0, "GUI build failed.");
       report_test("G007", "GUI tabs", "thread-mode tab switching and close",
-                  "Ctrl+T; cd /tmp; switch tabs; Ctrl+D", "tab state stays independent",
+                  "Ctrl+T; cd /tmp; switch tabs; hover and click ×", "tab state stays independent",
                   "application build failed", 0, "GUI build failed.");
       report_test("G008", "GUI scrollback", "thread-mode keyboard and mouse scrolling",
                   "seq 1 50; Page Up/Down; wheel up/down", "older and latest lines are visible",
@@ -4504,7 +4554,7 @@ static void run_selected(const char *selection) {
                   "clipboard rejects UTF8_STRING", "paste retries with XA_STRING",
                   "application build failed", 0, "GUI build failed.");
       report_test("G107", "GUI tabs", "process-mode tab switching and close",
-                  "Ctrl+T; cd /tmp; switch tabs; Ctrl+D", "tab state stays independent",
+                  "Ctrl+T; cd /tmp; switch tabs; hover and click ×", "tab state stays independent",
                   "application build failed", 0, "GUI build failed.");
       report_test("G108", "GUI scrollback", "process-mode keyboard and mouse scrolling",
                   "seq 1 50; Page Up/Down; wheel up/down", "older and latest lines are visible",
@@ -4623,11 +4673,12 @@ static void run_selected(const char *selection) {
                               : "STRING fallback failed",
                   fallback_ok, "Exercises the selection conversion retry path.");
       report_test("G007", "GUI tabs", "thread-mode tab switching and close",
-                  "Ctrl+T; cd /tmp; switch tabs; Ctrl+D",
+                  "Ctrl+T; cd /tmp; switch tabs; hover and click ×",
                   "each tab keeps its directory and can close independently",
-                  tab_switch_ok ? "both tabs kept their directories"
+                  tab_switch_ok ? "tab path title updated and hover-close worked"
                                 : "tab state, switching, or close failed",
-                  tab_switch_ok, "Checks actual GUI tab input and rendered output.");
+                  tab_switch_ok,
+                  "Checks per-tab path title updates, hover close icon, click-to-close, and directory isolation.");
       report_test("G008", "GUI scrollback", "thread-mode keyboard and mouse scrolling",
                   "seq 1 50; Page Up/Down; wheel up/down",
                   "older and latest output lines are visible",
@@ -4691,11 +4742,12 @@ static void run_selected(const char *selection) {
                               : "STRING fallback failed",
                   fallback_ok, "Exercises the selection conversion retry path.");
       report_test("G107", "GUI tabs", "process-mode tab switching and close",
-                  "Ctrl+T; cd /tmp; switch tabs; Ctrl+D",
+                  "Ctrl+T; cd /tmp; switch tabs; hover and click ×",
                   "each tab keeps its directory and can close independently",
-                  tab_switch_ok ? "both tabs kept their directories"
+                  tab_switch_ok ? "tab path title updated and hover-close worked"
                                 : "tab state, switching, or close failed",
-                  tab_switch_ok, "Checks actual GUI tab input and rendered output.");
+                  tab_switch_ok,
+                  "Checks per-tab path title updates, hover close icon, click-to-close, and directory isolation.");
       report_test("G108", "GUI scrollback", "process-mode keyboard and mouse scrolling",
                   "seq 1 50; Page Up/Down; wheel up/down",
                   "older and latest output lines are visible",

@@ -25,6 +25,7 @@ static Window win;
 static GC gc;
 static XFontStruct *font;
 static int width = 900, height = 600;
+static int pointer_x = -1, pointer_y = -1;
 static Atom wm_delete;
 static HotkeyConfig hotkey_config;
 static void clear_scrollback(Tab *tab) {
@@ -102,6 +103,72 @@ static int calculate_add_tab_button_x(size_t count) {
   return 8 + (int)count * calculate_tab_width(count) + 4;
 }
 
+static int tab_at_position(size_t count, int x, int y) {
+  if (y < 4 || y >= 30 || x < 8)
+    return -1;
+  int tab_width = calculate_tab_width(count);
+  size_t index = (size_t)(x - 8) / (size_t)tab_width;
+  return index < count ? (int)index : -1;
+}
+
+static int pointer_is_over_tab(size_t count, size_t tab_index) {
+  return tab_at_position(count, pointer_x, pointer_y) == (int)tab_index;
+}
+
+static void build_tab_title(const Tab *tab, char *title, size_t capacity) {
+  const char *user = getenv("USER");
+  char host[128] = "localhost";
+  char display_path[TERM_PATH_BUFFER + 2];
+  const char *path = tab->working_directory;
+  const char *home = getenv("HOME");
+  if (!user || !*user)
+    user = "user";
+  if (gethostname(host, sizeof(host)) < 0)
+    strcpy(host, "localhost");
+  host[sizeof(host) - 1] = '\0';
+  if (home && *home && !strncmp(path, home, strlen(home)) &&
+      (path[strlen(home)] == '\0' || path[strlen(home)] == '/')) {
+    snprintf(display_path, sizeof(display_path), "~%s", path + strlen(home));
+    path = display_path;
+  }
+  snprintf(title, capacity, "%s@%s:%s", user, host, path);
+}
+
+static void draw_tab_title(const Tab *tab, int x, int y, int max_width) {
+  if (max_width < 0)
+    max_width = 0;
+  char full_title[TERM_PATH_BUFFER + 160];
+  char visible_title[TERM_PATH_BUFFER + 160];
+  build_tab_title(tab, full_title, sizeof(full_title));
+  size_t title_length = strlen(full_title);
+  size_t keep_length = title_length;
+  if (font) {
+    while (keep_length &&
+           XTextWidth(font, full_title + title_length - keep_length,
+                      (int)keep_length) > max_width)
+      keep_length--;
+    if (keep_length < title_length && max_width >= 24) {
+      int suffix_width = max_width - XTextWidth(font, "...", 3);
+      while (keep_length &&
+             XTextWidth(font, full_title + title_length - keep_length,
+                        (int)keep_length) > suffix_width)
+        keep_length--;
+    }
+  } else {
+    keep_length = (size_t)(max_width / 8);
+    if (keep_length > title_length)
+      keep_length = title_length;
+  }
+  const char *visible_start = full_title + title_length - keep_length;
+  if (keep_length < title_length && max_width >= 24) {
+    snprintf(visible_title, sizeof(visible_title), "...%s", visible_start);
+  } else {
+    snprintf(visible_title, sizeof(visible_title), "%s", visible_start);
+  }
+  XDrawString(dpy, win, gc, x, y, visible_title,
+              (int)strlen(visible_title));
+}
+
 static int terminal_line_height(void) {
   return font ? font->ascent + font->descent + 3 : 18;
 }
@@ -127,13 +194,13 @@ static void draw_terminal_window(App *app) {
     int tab_fill_width = tab_width > 2 ? tab_width - 2 : 1;
     XFillRectangle(dpy, win, gc, x, 4, (unsigned)tab_fill_width, 26);
     XSetForeground(dpy, gc, 0xf2f2f2);
-    char label[24];
-    snprintf(label, sizeof(label), "%zu", i + 1);
-    int label_width = font ? XTextWidth(font, label, (int)strlen(label))
-                           : (int)strlen(label) * 8;
-    if (label_width <= tab_width - 8)
-      XDrawString(dpy, win, gc, x + (tab_width - label_width) / 2, 22, label,
-                  (int)strlen(label));
+    draw_tab_title(&app->tabs[i], x + 7, 22, tab_width - 30);
+    if (pointer_is_over_tab(app->tab_count, i)) {
+      int close_x = x + tab_width - 13;
+      XSetForeground(dpy, gc, 0xf2f2f2);
+      XDrawLine(dpy, win, gc, close_x - 3, 12, close_x + 3, 18);
+      XDrawLine(dpy, win, gc, close_x + 3, 12, close_x - 3, 18);
+    }
   }
   int plus_x = calculate_add_tab_button_x(app->tab_count);
   XSetForeground(dpy, gc, 0x4a2944);
@@ -679,7 +746,8 @@ int gui_run(App *app) {
   XStoreName(dpy, win, "Terminator");
   XSelectInput(dpy, win,
                ExposureMask | KeyPressMask | StructureNotifyMask |
-                   ButtonPressMask | ButtonReleaseMask | ButtonMotionMask);
+                   ButtonPressMask | ButtonReleaseMask | ButtonMotionMask |
+                   PointerMotionMask | LeaveWindowMask);
   selection_init(dpy);
   wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
   XSetWMProtocols(dpy, win, &wm_delete, 1);
@@ -735,18 +803,24 @@ int gui_run(App *app) {
         } else if (ev.type == ButtonPress) {
           if (ev.xbutton.y < 34) {
             selection_clear();
+            int tab_width = calculate_tab_width(app->tab_count);
+            int tab_index = tab_at_position(app->tab_count, ev.xbutton.x,
+                                            ev.xbutton.y);
             int plus_x = calculate_add_tab_button_x(app->tab_count);
-            if (ev.xbutton.x >= plus_x && ev.xbutton.x < plus_x + 32) {
+            if (tab_index >= 0 &&
+                ev.xbutton.x >= 8 + (tab_index + 1) * tab_width - 22 &&
+                ev.xbutton.x < 8 + (tab_index + 1) * tab_width - 4) {
+              app_close_tab(app, (size_t)tab_index);
+              if (!app->tab_count)
+                terminator_stopping = 1;
+            } else if (ev.xbutton.x >= plus_x &&
+                       ev.xbutton.x < plus_x + 32) {
               if (app_add_tab(app) < 0)
                 append_output_text(&app->tabs[app->active_tab],
                                    "terminator: maximum tabs reached\n", 34);
             } else {
-              int tab_width = calculate_tab_width(app->tab_count);
-              size_t ix = ev.xbutton.x >= 8
-                              ? (size_t)((ev.xbutton.x - 8) / tab_width)
-                              : app->tab_count;
-              if (ix < app->tab_count)
-                app->active_tab = ix;
+              if (tab_index >= 0)
+                app->active_tab = (size_t)tab_index;
             }
             draw_terminal_window(app);
           } else if (ev.xbutton.y >= 54 &&
@@ -765,11 +839,16 @@ int gui_run(App *app) {
                                  terminal_line_height(), font);
             draw_terminal_window(app);
           }
-        } else if (ev.type == MotionNotify &&
-                   (ev.xmotion.state & Button1Mask)) {
-          selection_mouse_move(app, ev.xmotion.x, ev.xmotion.y,
-                               terminal_visible_rows(),
-                               terminal_line_height(), font);
+        } else if (ev.type == MotionNotify) {
+          pointer_x = ev.xmotion.x;
+          pointer_y = ev.xmotion.y;
+          if (ev.xmotion.state & Button1Mask)
+            selection_mouse_move(app, ev.xmotion.x, ev.xmotion.y,
+                                 terminal_visible_rows(),
+                                 terminal_line_height(), font);
+          draw_terminal_window(app);
+        } else if (ev.type == LeaveNotify) {
+          pointer_x = pointer_y = -1;
           draw_terminal_window(app);
         } else if (ev.type == ButtonRelease &&
                    ev.xbutton.button == Button1) {
