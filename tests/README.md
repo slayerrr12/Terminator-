@@ -44,7 +44,7 @@ and crash cases are listed in `docs/requirements-test-matrix.md`.
 | IDs | Feature | Coverage |
 | --- | --- | --- |
 | `P001`–`P014` | Parser | Empty input, unfinished quotes, nested and multiline substitutions, backslash continuation, quoted operators, pipelines, redirections, malformed syntax, many arguments, repeated output redirection, near-limit input, carriage-return handling, and 2,000 malformed-input crash/hang cases |
-| `H002`–`H028`, `H112`–`H113` | Persistent history | 10,000-entry retention, ordering, snapshots, restart persistence, escaped newline/CR/backslash, exact search, longest-substring fallback, tie handling, concurrent writers, private file permissions, null/empty/oversized inputs, default path, missing `HOME`, and overlong paths |
+| `H002`–`H028`, `H112`–`H113` | Persistent history | 10,000-entry retention, ordering, snapshots, restart persistence, escaped newline/CR/backslash, case-sensitive substring search, longest-substring fallback, tie handling, concurrent writers, private file permissions, null/empty/oversized inputs, default path, missing `HOME`, and overlong paths |
 | `H031`–`H111` | History-search reference matrix | 81 generated four-character queries compared with a brute-force longest-common-substring implementation |
 | `C001`–`C039` | Filename completion | Common prefix, unique match, directories, relative/absolute/nested paths, hidden files, quotes, escapes, operators, symlinks, newline/CR filenames, cursor placement, suffix preservation, invalid inputs, selection bounds, and ordering |
 | `C040`–`C130` | Completion prefix matrix | Every prefix of regular, hidden, spaced, quoted, operator, and expansion-character filenames is checked for matching and decoding correctness |

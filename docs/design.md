@@ -49,22 +49,46 @@ uses `flock()` to coordinate separate application processes. In process mode,
 the small coordination structure is in shared memory and the history records
 remain in the file.
 
-Ctrl+R switches the GUI input to a search prompt. On Enter, the history module
-prints every command containing the term. If there is no exact occurrence, it
-prints every command tied for the longest shared substring when that substring
-has more than two bytes. A missing or too-short match prints the required
-no-match message.
+The history-related fields are intentionally split by lifetime. `App` holds a
+pointer to the shared `SharedHistory` object. Each `Tab` has its own
+`history_position` and draft buffer for Up/Down browsing, plus a separate
+search buffer for Ctrl+R. Filename completion state is also per tab: the
+candidate names, their count, the cursor to resume at, the common-prefix
+length, and the active quote style live in `Tab`. `CompletionResult` in
+`completion.h` temporarily holds the matches and token information while a
+completion scan runs. The command records themselves stay on disk rather than
+being kept in a permanent in-memory array.
+
+Ctrl+R switches the active tab to a separate search prompt. On Enter,
+`history_search()` first scans saved commands for the case-sensitive search
+text as a substring and prints every command containing it, in history-file
+order. If there are no such commands, it finds each command's longest shared
+continuous substring with the search term and prints all commands tied for the
+longest match, provided the match is longer than two bytes. Otherwise the GUI
+prints the no-match message. The search buffer is separate from the normal
+command line, so the search term is not executed or added to history.
+
+The assignment wording says “the most recent command that exactly matches the
+term,” while its example displays more than one matching command. The current
+implementation follows the example by displaying all substring matches; it
+does not return only the newest whole-command match.
+
+The ordinary `history` built-in uses a different path: `shell.c` asks
+`history_snapshot()` for up to the newest 1,000 entries and prints them. Up and
+Down use `history_get_recent()` to fetch one command at a time from the shared
+file, while Ctrl+R calls `history_search()`.
 
 ## Filename completion and `less`
 
-`completion.c` scans the active tab's logical working directory for names
-matching the word before the cursor. It decodes quotes and backslash escapes
-while matching, then encodes only the missing suffix for the current quote
-style. Directories receive a trailing slash. Multiple candidates are sorted;
-the GUI inserts their common prefix and presents a numbered chooser. The
-insertion routine leaves text after the cursor in place. Names containing
-newline or carriage return are omitted because the shell treats those bytes as
-input separators.
+`completion.c` scans the active tab's logical working directory (or the
+directory portion typed in the path) for names matching the word before the
+cursor. It decodes quotes and backslash escapes while matching, then encodes
+only the missing suffix for the current quote style. Directories receive a
+trailing slash. Multiple candidates are sorted; the GUI inserts their common
+prefix and presents a numbered chooser if they remain ambiguous. The insertion
+routine leaves text after the cursor in place. Names containing newline or
+carriage return are omitted because the shell treats those bytes as input
+separators. Completion fills the input line; it does not execute the command.
 
 The `less` built-in streams file bytes or standard input to its output file
 descriptor. In the GUI, that output flows into the tab's scrollback buffer, so

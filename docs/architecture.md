@@ -54,7 +54,8 @@ flowchart LR
 The GUI polls the X11 connection and every tab's output and status pipes. It
 sleeps while there is no input or output to process. Only the GUI calls Xlib.
 Mouse selection and clipboard messages are handled in `selection.c` by the
-same GUI thread.
+same GUI thread. Selection uses the rendered text for visible output, the live
+prompt, and the editable input line.
 Each tab owns its own scrollback ring, limited to 10,000 lines and 1 MiB of
 allocated line text. The GUI draws the active tab's visible slice and tracks
 its first visible line while output continues. For a line larger than the
@@ -84,14 +85,17 @@ working directories.
 `TERMINATOR_HISTORY_FILE` to use another path. A semaphore protects threads
 inside one application, and a sidecar lock file coordinates separate
 Terminator processes. The file keeps the newest 10,000 commands; the `history`
-built-in prints the newest 1,000. The GUI's Ctrl+R mode shows exact matches, or
-the commands tied for the longest shared substring when there is no exact
-match.
+built-in prints the newest 1,000. Ctrl+R first shows every command containing
+the typed, case-sensitive text. If none do, it shows commands tied for the
+longest shared continuous substring when that substring is more than two bytes.
+The current code follows the assignment example by showing all containing
+commands, rather than only the newest whole-command match.
 
 `completion.c` finds the word before the active tab's cursor and scans the
-tab's logical working directory. One match is inserted. Multiple matches
-insert their common prefix and display a numbered list. The GUI keeps text
-after the cursor in place and lets the user select a candidate by number.
+active tab's logical working directory, or a directory path typed as part of
+the word. One match is inserted. Multiple matches insert their common prefix
+and display a sorted numbered list if they remain ambiguous. The GUI keeps
+text after the cursor in place and lets the user select a candidate by number.
 
 The `less` built-in copies files or standard input to its output stream, which
 the GUI adds to that tab's scrollback. It is a simple viewer because the

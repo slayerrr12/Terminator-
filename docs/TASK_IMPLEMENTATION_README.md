@@ -376,8 +376,9 @@ copy and paste. Ctrl+C and Ctrl+Z signal the active job; Ctrl+T opens a tab.
 
 If a configured key is unknown or conflicts with another binding, the loader
 reports the problem in the first tab's scrollback and keeps the default for
-that action. Dragging over output selects text. `src/selection.c` owns selection
-drawing, mouse tracking, and X11 clipboard exchange.
+that action. Dragging over visible text selects it, including output, the live
+prompt, and editable input. `src/selection.c` owns selection drawing, mouse
+tracking, and X11 clipboard exchange.
 
 ## Task 8: signals and job control
 
@@ -404,11 +405,14 @@ application, and a sidecar lock file coordinates separate Terminator
 processes.
 
 Press **Ctrl+R**, type a term, and press Enter. The GUI first displays every
-command containing that exact text. If there are no exact hits, it finds the
-longest common substring between the term and each command. If the best
-substring is longer than two characters, all commands tied for that longest
-match are displayed. Otherwise it prints `No match for search term in
-history`. The scrollback transcript shows the `USER@terminator> (Ctrl+R)`
+command containing that case-sensitive text. If no command contains the term,
+it finds the longest common substring between the term and each command. If the
+best substring is longer than two characters, all commands tied for that
+longest match are displayed. Otherwise it prints `No match for search term in
+history`. The exact pass displays matches in history-file order. The
+assignment's wording says “the most recent command,” while its example shows
+multiple matches; the current code follows the example. The scrollback
+transcript shows the `USER@terminator> (Ctrl+R)`
 line, then `Enter search term: <term>`, then the matches or no-match message.
 This preserves the order shown in the assignment example. Search terms are
 displayed for context but are not saved as commands.
@@ -429,9 +433,9 @@ displayed for context but are not saved as commands.
 `history_add()` encodes special line bytes, then takes the semaphore and the
 lock file before appending. Once more than 10,000 records are present, it
 copies the newest 10,000 rows to a temporary file and replaces the old file.
-`history_search()` checks exact text first. Only when there are no exact hits
-does it use a suffix automaton to find the longest shared substring without
-comparing every character pair quadratically.
+`history_search()` checks whether the term occurs inside each command first.
+Only when there are no containing commands does it build a suffix automaton
+for the term and use it to find the longest shared substring efficiently.
 
 The GUI uses a separate search buffer, so Enter displays matches instead of
 running the search term as a shell command.

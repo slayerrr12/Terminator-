@@ -15,8 +15,8 @@ for a finished later task.
 | Task 6: `multiWatch` | Implemented | Commands run concurrently; `poll()` collects their output and completed commands restart after about two seconds. |
 | Task 7: configurable hotkeys | Implemented | Editing, history, Ctrl+R search, clear, close, copy/paste, interrupt, suspend, and new-tab bindings load from `~/.terminatorrc`; invalid or conflicting bindings are reported and use their defaults. |
 | Task 8: signals and job control | Implemented for the assignment requirements | Ctrl+C and Ctrl+Z signal the active job process group; `cmd &`, `jobs`, `fg`, and `bg` are supported. PTY-based terminal control is not implemented. |
-| Task 9: searchable persistent history | Implemented | Tabs share a persistent history file containing up to 10,000 commands. The `history` command prints the newest 1,000; Ctrl+R searches for exact matches, then longest-common-substring ties. |
-| Task 10: file-name completion | Implemented | Tab completes from the active tab's working directory, preserves text after the cursor, inserts a unique match or common prefix, and displays numbered choices for ambiguous matches. |
+| Task 9: searchable persistent history | Implemented | Tabs share a persistent history file containing up to 10,000 commands. The `history` command prints the newest 1,000; Ctrl+R first displays all case-sensitive substring hits, then longest-common-substring ties when there are no hits. |
+| Task 10: file-name completion | Implemented | Tab scans the active tab's working directory or a typed path, preserves text after the cursor and quoting, inserts a unique match or common prefix, and displays sorted numbered choices when ambiguous. |
 | Task 11: Bash-subset script interpreter | Not implemented | `source` executes complete lines through the current shell parser; it does not interpret assignments, positional parameters, or conditional blocks itself. |
 
 ## Main extension points

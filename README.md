@@ -13,6 +13,14 @@ Install the compiler, Make, and X11 development files on Debian or Ubuntu:
 sudo apt install build-essential libx11-dev
 ```
 
+The Makefile uses the project's C/POSIX compiler flags and links Xlib with
+`-lX11`; no additional third-party library is required to build the app. To run
+GUI tests without an active X display, install the optional X virtual display:
+
+```sh
+sudo apt install xvfb
+```
+
 From the project directory, build the executable and start it:
 
 ```sh
@@ -53,15 +61,17 @@ observed result, and any failure makes the target return nonzero. Use
 - Press **Ctrl+C** to interrupt the selected tab's foreground job and **Ctrl+Z**
   to stop it.
 - Use **Up** and **Down** to browse the shared command history. Press **Ctrl+R**
-  to search it. Type a term and press Enter: exact matches are shown first; if
-  there are none, commands tied for the longest shared substring are shown.
+  to search it. Type a term and press Enter: all commands containing that
+  case-sensitive text are shown first. If none contain it, commands tied for
+  the longest shared substring are shown when that match is longer than two
+  characters.
 - Press **Tab** to complete the filename before the cursor using the active
   tab's working directory. One match completes directly. Multiple matches
   complete the shared prefix, list the choices, and wait for a number and Enter.
-- Use **Page
-  Up/Page Down** or the mouse wheel to scroll output. Each tab keeps up to
+- Use **Page Up/Page Down** or the mouse wheel to scroll output. Each tab keeps up to
   10,000 output lines within a 1 MiB scrollback budget.
-- Use **Ctrl+Shift+C/V** to copy selected output and paste text into the input.
+- Use **Ctrl+Shift+C/V** to copy selected visible text and paste into the input.
+  Selection includes displayed output, the prompt, and editable command text.
 - Use **Ctrl+A/E**, **Ctrl+U/K/W**, **Left/Right**, and **Backspace** to edit
   the current command line. **Ctrl+L** clears the active tab's output.
 
@@ -86,7 +96,8 @@ observed result, and any failure makes the target return nonzero. Use
   read standard input through a pipe or redirection. Because the app has no
   PTY, this is a simple scrollback viewer rather than a full-screen pager.
 - Tab filename completion searches the current tab's directory, respects
-  quotes and escaped characters, and preserves input after the cursor.
+  quotes and escaped characters, preserves input after the cursor, and offers
+  numbered choices when multiple names remain ambiguous.
 - Persistent configurable editing hotkeys read from `~/.terminatorrc`.
 
 ## Change hotkeys
