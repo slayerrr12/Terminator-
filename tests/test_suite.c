@@ -3625,6 +3625,16 @@ static int paste_external_command(Display *display, Window window,
   return command_saved && output_visible ? 0 : -1;
 }
 
+/* Match the application's font choice so pixel-based GUI checks stay aligned. */
+static XFontStruct *load_gui_test_font(Display *display) {
+  XFontStruct *font = XLoadQueryFont(display, "10x20");
+  if (!font)
+    font = XLoadQueryFont(display, "9x15");
+  if (!font)
+    font = XLoadQueryFont(display, "fixed");
+  return font;
+}
+
 static int test_gui_clipboard_copy(Display *display, Window window,
                                    Display *clipboard_display,
                                    Window clipboard_window) {
@@ -3636,9 +3646,7 @@ static int test_gui_clipboard_copy(Display *display, Window window,
   int marker_y = gui_find_text_line(display, window, copied_text, -1);
   int first_y = gui_find_text_line(display, window, first_line, -1);
   int second_y = gui_find_text_line(display, window, second_line, -1);
-  XFontStruct *font = XLoadQueryFont(display, "9x15");
-  if (!font)
-    font = XLoadQueryFont(display, "fixed");
+  XFontStruct *font = load_gui_test_font(display);
   int result = -1;
   if (!font) {
     fprintf(stderr, "clipboard test: test font could not be loaded\n");
@@ -3756,9 +3764,7 @@ static void wait_milliseconds(long milliseconds) {
 static int gui_find_text_line(Display *display, Window window,
                               const char *expected_text,
                               int after_baseline) {
-  XFontStruct *font = XLoadQueryFont(display, "9x15");
-  if (!font)
-    font = XLoadQueryFont(display, "fixed");
+  XFontStruct *font = load_gui_test_font(display);
   if (!font)
     return -1;
 

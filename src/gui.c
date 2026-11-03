@@ -752,7 +752,10 @@ int gui_run(App *app) {
   wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
   XSetWMProtocols(dpy, win, &wm_delete, 1);
   gc = XCreateGC(dpy, win, 0, NULL);
-  font = XLoadQueryFont(dpy, "9x15");
+  /* Use a clear fixed-width terminal font and fall back on older X servers. */
+  font = XLoadQueryFont(dpy, "10x20");
+  if (!font)
+    font = XLoadQueryFont(dpy, "9x15");
   if (!font)
     font = XLoadQueryFont(dpy, "fixed");
   XMapWindow(dpy, win);
