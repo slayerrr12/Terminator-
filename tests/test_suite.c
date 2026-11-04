@@ -3978,7 +3978,7 @@ static int test_gui_editor(Display *display, Window window,
       send_gui_text(display, window, "EDITOR_OK") < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
-  wait_milliseconds(250);
+  wait_milliseconds(500);
   int delete_word_ok = gui_command_was_saved(
       history_path, "/usr/bin/echo EDITOR_OK\n");
 
@@ -3990,7 +3990,7 @@ static int test_gui_editor(Display *display, Window window,
   if (send_gui_key(display, window, XK_k, ControlMask) < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
-  wait_milliseconds(250);
+  wait_milliseconds(500);
   int delete_to_end_ok =
       gui_command_was_saved(history_path, "/usr/bin/echo KEEP\n");
 
@@ -4000,7 +4000,7 @@ static int test_gui_editor(Display *display, Window window,
       send_gui_text(display, window, "_END") < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
-  wait_milliseconds(250);
+  wait_milliseconds(500);
   int cursor_keys_ok =
       gui_command_was_saved(history_path, "/usr/bin/echo MOVE_END\n");
 
@@ -4009,11 +4009,17 @@ static int test_gui_editor(Display *display, Window window,
       send_gui_text(display, window, "/usr/bin/echo CLEAR_OK") < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
-  wait_milliseconds(250);
+  wait_milliseconds(500);
   char *history = read_text_file(history_path);
   int delete_to_start_ok = history && contains(history, "/usr/bin/echo CLEAR_OK\n") &&
                            !contains(history, "discard this line");
   free(history);
+  if (!delete_word_ok || !delete_to_end_ok || !cursor_keys_ok ||
+      !delete_to_start_ok)
+    fprintf(stderr,
+            "GUI editor mismatch: word=%d end=%d cursor=%d start=%d\n",
+            delete_word_ok, delete_to_end_ok, cursor_keys_ok,
+            delete_to_start_ok);
   return delete_word_ok && delete_to_end_ok && cursor_keys_ok &&
                  delete_to_start_ok
              ? 0
