@@ -208,6 +208,61 @@ static size_t terminal_visible_rows(void) {
   return visible > 0 ? (size_t)visible : 1;
 }
 
+static int terminal_character_width(void) {
+  int character_width = font ? font->max_bounds.width : 8;
+  return character_width > 0 ? character_width : 8;
+}
+
+static size_t longest_display_line(const Tab *tab) {
+  size_t longest = 0;
+  for (size_t line = 0; line < tab->scrollback.line_count; line++) {
+    size_t length = strlen(scrollback_get_line(&tab->scrollback, line));
+    if (length > longest)
+      longest = length;
+  }
+
+  if (tab->command_is_running)
+    return longest;
+
+  char prompt[sizeof(tab->working_directory) + 256];
+  size_t input_length = 0;
+  if (tab->history_search_active) {
+    strcpy(prompt, "Enter search term: ");
+    input_length = tab->history_search_length;
+  } else if (tab->completion_waiting) {
+    strcpy(prompt, "Select file number: ");
+    input_length = tab->completion_choice_length;
+  } else if (tab->multiline_length) {
+    strcpy(prompt, "> ");
+  } else {
+    build_shell_prompt(tab, prompt, sizeof(prompt), NULL, NULL);
+    input_length = tab->input_length;
+  }
+
+  const char *last_output = tab->scrollback.line_count
+                                ? scrollback_get_line(
+                                      &tab->scrollback,
+                                      tab->scrollback.line_count - 1)
+                                : "";
+  size_t current_length = strlen(last_output) + strlen(prompt) + input_length;
+  return current_length > longest ? current_length : longest;
+}
+
+static void scroll_horizontal(Tab *tab, int direction) {
+  int character_width = terminal_character_width();
+  size_t visible_columns = width > 12
+                              ? (size_t)(width - 12) / (size_t)character_width
+                              : 1;
+  if (!visible_columns)
+    visible_columns = 1;
+  size_t content_columns = longest_display_line(tab);
+  size_t maximum_offset = content_columns > visible_columns
+                              ? content_columns - visible_columns
+                              : 0;
+  scrollback_scroll_horizontal(&tab->scrollback, maximum_offset, 8,
+                               direction);
+}
+
 static void draw_terminal_window(App *app) {
   if (!dpy)
     return;
@@ -248,6 +303,19 @@ static void draw_terminal_window(App *app) {
   size_t total = tab->scrollback.line_count;
   if (prompt_visible && total == 0)
     total = 1;
+  int character_width = terminal_character_width();
+  size_t visible_columns = width > 12
+                              ? (size_t)(width - 12) / (size_t)character_width
+                              : 1;
+  if (!visible_columns)
+    visible_columns = 1;
+  size_t content_columns = longest_display_line(tab);
+  size_t maximum_offset = content_columns > visible_columns
+                              ? content_columns - visible_columns
+                              : 0;
+  scrollback_scroll_horizontal(&tab->scrollback, maximum_offset, 0, 0);
+  int horizontal_pixels =
+      (int)(tab->scrollback.horizontal_offset * (size_t)character_width);
   size_t first = scrollback_first_visible(&tab->scrollback, visible);
   selection_begin_frame(visible);
   int y = top;
@@ -313,8 +381,9 @@ static void draw_terminal_window(App *app) {
     } else if (output_length)
       prompt_color_count =
           color_saved_prompt(output, output_length, prompt_colors);
-    selection_draw_line(dpy, win, gc, font, row - first, display_line, 12, y,
-                        prompt_colors, prompt_color_count);
+    selection_draw_line(dpy, win, gc, font, row - first, display_line,
+                        12 - horizontal_pixels, y, prompt_colors,
+                        prompt_color_count);
 
     if (prompt_text && tab->scrollback.follows_output) {
       int output_width = font ? XTextWidth(font, output, (int)output_length)
@@ -324,7 +393,8 @@ static void draw_terminal_window(App *app) {
                               : (int)prompt_length * 8;
       int input_width = font ? XTextWidth(font, input, (int)input_cursor)
                              : (int)input_cursor * 8;
-      int cursor_x = 12 + output_width + prompt_width + input_width;
+      int cursor_x = 12 - horizontal_pixels + output_width + prompt_width +
+                     input_width;
       XDrawLine(dpy, win, gc, cursor_x, y - (font ? font->ascent : 10),
                 cursor_x, y + (font ? font->descent : 3));
     }
@@ -876,16 +946,22 @@ int gui_run(App *app) {
                      (ev.xbutton.button == Button4 ||
                       ev.xbutton.button == Button5)) {
             Tab *tab = &app->tabs[app->active_tab];
-            size_t visible_rows = terminal_visible_rows();
-            if (ev.xbutton.button == Button4)
-              scrollback_scroll_up(&tab->scrollback, visible_rows, 3);
-            else
-              scrollback_scroll_down(&tab->scrollback, visible_rows, 3);
+            if (ev.xbutton.state & ShiftMask) {
+              scroll_horizontal(tab, ev.xbutton.button == Button4 ? -1 : 1);
+            } else {
+              size_t visible_rows = terminal_visible_rows();
+              if (ev.xbutton.button == Button4)
+                scrollback_scroll_up(&tab->scrollback, visible_rows, 3);
+              else
+                scrollback_scroll_down(&tab->scrollback, visible_rows, 3);
+            }
             draw_terminal_window(app);
           } else if (ev.xbutton.button == Button1) {
             selection_mouse_down(app, ev.xbutton.x, ev.xbutton.y,
                                  terminal_visible_rows(),
-                                 terminal_line_height(), font);
+                                 terminal_line_height(), font,
+                                 app->tabs[app->active_tab]
+                                     .scrollback.horizontal_offset);
             draw_terminal_window(app);
           }
         } else if (ev.type == MotionNotify) {
@@ -894,7 +970,9 @@ int gui_run(App *app) {
           if (ev.xmotion.state & Button1Mask)
             selection_mouse_move(app, ev.xmotion.x, ev.xmotion.y,
                                  terminal_visible_rows(),
-                                 terminal_line_height(), font);
+                                 terminal_line_height(), font,
+                                 app->tabs[app->active_tab]
+                                     .scrollback.horizontal_offset);
           draw_terminal_window(app);
         } else if (ev.type == LeaveNotify) {
           pointer_x = pointer_y = -1;
@@ -903,7 +981,8 @@ int gui_run(App *app) {
                    ev.xbutton.button == Button1) {
           selection_mouse_up(app, ev.xbutton.x, ev.xbutton.y,
                              terminal_visible_rows(), terminal_line_height(),
-                             font);
+                             font, app->tabs[app->active_tab]
+                                       .scrollback.horizontal_offset);
           draw_terminal_window(app);
         } else if (ev.type == SelectionRequest || ev.type == SelectionNotify) {
           char paste[TERM_LINE_MAX];

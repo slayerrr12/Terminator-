@@ -187,6 +187,7 @@ void scrollback_clear(Scrollback *scrollback) {
   scrollback->line_count = 0;
   scrollback->oldest_line = 0;
   scrollback->first_visible_line = 0;
+  scrollback->horizontal_offset = 0;
   scrollback->stored_bytes = 0;
   scrollback->follows_output = 1;
 }
@@ -280,4 +281,20 @@ void scrollback_scroll_up(Scrollback *scrollback, size_t visible_rows,
 void scrollback_scroll_down(Scrollback *scrollback, size_t visible_rows,
                             size_t amount) {
   scroll_by(scrollback, visible_rows, amount, 1);
+}
+
+void scrollback_scroll_horizontal(Scrollback *scrollback,
+                                 size_t maximum_offset, size_t amount,
+                                 int direction) {
+  size_t current = scrollback->horizontal_offset;
+  if (current > maximum_offset)
+    current = maximum_offset;
+
+  if (direction < 0)
+    current = amount > current ? 0 : current - amount;
+  else
+    current = amount > maximum_offset - current ? maximum_offset
+                                                 : current + amount;
+
+  scrollback->horizontal_offset = current;
 }

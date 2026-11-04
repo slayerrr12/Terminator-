@@ -18,6 +18,7 @@ typedef struct {
   size_t line_capacity;
   size_t oldest_line;
   size_t first_visible_line;
+  size_t horizontal_offset;
   size_t stored_bytes;
   int follows_output;
 } Scrollback;
@@ -31,6 +32,9 @@ void scrollback_scroll_up(Scrollback *scrollback, size_t visible_rows,
                           size_t amount);
 void scrollback_scroll_down(Scrollback *scrollback, size_t visible_rows,
                             size_t amount);
+void scrollback_scroll_horizontal(Scrollback *scrollback,
+                                 size_t maximum_offset, size_t amount,
+                                 int direction);
 void scrollback_scroll_to(Scrollback *scrollback, size_t line,
                           size_t visible_rows);
 size_t scrollback_first_visible(const Scrollback *scrollback,

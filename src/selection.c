@@ -178,6 +178,7 @@ void selection_draw_line(Display *display, Window window, GC graphics,
 
 static int mouse_text_position(int x, int y, size_t visible_rows,
                                int line_height, XFontStruct *font,
+                               size_t horizontal_offset,
                                size_t *line_number, size_t *column) {
   /* draw_terminal_window passes 54 as the text baseline, not its top edge. */
   int text_top = 54 - (font ? font->ascent : 12);
@@ -194,8 +195,11 @@ static int mouse_text_position(int x, int y, size_t visible_rows,
   if (character_width < 1)
     character_width = 8;
   *line_number = row;
-  *column = x <= 12 ? 0 : (size_t)(x - 12 + character_width / 2) /
-                              (size_t)character_width;
+  size_t visible_column = x <= 12
+                              ? 0
+                              : (size_t)(x - 12 + character_width / 2) /
+                                    (size_t)character_width;
+  *column = horizontal_offset + visible_column;
   size_t length = strlen(text);
   if (*column > length)
     *column = length;
@@ -203,11 +207,12 @@ static int mouse_text_position(int x, int y, size_t visible_rows,
 }
 
 void selection_mouse_down(App *app, int x, int y, size_t visible_rows,
-                          int line_height, XFontStruct *font) {
+                          int line_height, XFontStruct *font,
+                          size_t horizontal_offset) {
   size_t line, column;
   selection_clear();
-  if (!mouse_text_position(x, y, visible_rows, line_height, font, &line,
-                           &column))
+  if (!mouse_text_position(x, y, visible_rows, line_height, font,
+                           horizontal_offset, &line, &column))
     return;
 
   selection.dragging = 1;
@@ -217,11 +222,12 @@ void selection_mouse_down(App *app, int x, int y, size_t visible_rows,
 }
 
 static void update_selection(int x, int y, size_t visible_rows,
-                             int line_height, XFontStruct *font) {
+                             int line_height, XFontStruct *font,
+                             size_t horizontal_offset) {
   size_t line, column;
   if (!selection.dragging ||
-      !mouse_text_position(x, y, visible_rows, line_height, font, &line,
-                           &column))
+      !mouse_text_position(x, y, visible_rows, line_height, font,
+                           horizontal_offset, &line, &column))
     return;
 
   selection.end_line = line;
@@ -232,15 +238,17 @@ static void update_selection(int x, int y, size_t visible_rows,
 }
 
 void selection_mouse_move(App *app, int x, int y, size_t visible_rows,
-                          int line_height, XFontStruct *font) {
+                          int line_height, XFontStruct *font,
+                          size_t horizontal_offset) {
   (void)app;
-  update_selection(x, y, visible_rows, line_height, font);
+  update_selection(x, y, visible_rows, line_height, font, horizontal_offset);
 }
 
 void selection_mouse_up(App *app, int x, int y, size_t visible_rows,
-                        int line_height, XFontStruct *font) {
+                        int line_height, XFontStruct *font,
+                        size_t horizontal_offset) {
   (void)app;
-  update_selection(x, y, visible_rows, line_height, font);
+  update_selection(x, y, visible_rows, line_height, font, horizontal_offset);
   selection.dragging = 0;
 }
 

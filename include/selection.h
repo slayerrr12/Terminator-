@@ -22,11 +22,14 @@ void selection_draw_line(Display *display, Window window, GC graphics,
                          const TextColorRange *color_ranges,
                          size_t color_range_count);
 void selection_mouse_down(App *app, int x, int y, size_t visible_rows,
-                          int line_height, XFontStruct *font);
+                          int line_height, XFontStruct *font,
+                          size_t horizontal_offset);
 void selection_mouse_move(App *app, int x, int y, size_t visible_rows,
-                         int line_height, XFontStruct *font);
+                         int line_height, XFontStruct *font,
+                         size_t horizontal_offset);
 void selection_mouse_up(App *app, int x, int y, size_t visible_rows,
-                        int line_height, XFontStruct *font);
+                        int line_height, XFontStruct *font,
+                        size_t horizontal_offset);
 void selection_copy_to_clipboard(App *app, Display *display, Window window);
 void selection_request_paste(Display *display, Window window);
 size_t selection_handle_event(Display *display, Window window, XEvent *event,

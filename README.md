@@ -69,8 +69,9 @@ observed result, and any failure makes the target return nonzero. Use
 - Press **Tab** to complete the filename before the cursor using the active
   tab's working directory. One match completes directly. Multiple matches
   complete the shared prefix, list the choices, and wait for a number and Enter.
-- Use **Page Up/Page Down** or the mouse wheel to scroll output. Each tab keeps up to
-  10,000 output lines within a 1 MiB scrollback budget.
+- Use **Page Up/Page Down** or the mouse wheel to scroll output vertically. Use
+  **Shift + mouse wheel** to scroll horizontally across long lines. Each tab
+  keeps up to 10,000 output lines within a 1 MiB scrollback budget.
 - Use **Ctrl+Shift+C/V** to copy selected visible text and paste into the input.
   Selection includes displayed output, the prompt, and editable command text.
 - Use **Ctrl+A/E**, **Ctrl+U/K/W**, **Left/Right**, and **Backspace** to edit

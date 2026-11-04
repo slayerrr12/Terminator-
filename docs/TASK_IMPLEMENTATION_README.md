@@ -117,9 +117,10 @@ buffer and up to 10,000 lines of output within a 1 MiB allocated-text budget.
 If one output line exceeds that budget, the buffer keeps its tail. Clicking a
 tab changes which tab is drawn and receives keyboard input. The other tabs'
 workers continue running.
-The mouse wheel and Page Up/Page Down scroll the active tab. If output arrives
-while the user is looking at earlier lines, the viewport stays on the same
-content. Returning to the bottom resumes following output.
+The mouse wheel and Page Up/Page Down scroll the active tab vertically. Shift
++ mouse wheel scrolls horizontally across long lines. If output arrives while
+the user is looking at earlier lines, the viewport stays on the same content.
+Returning to the bottom resumes following output.
 
 `XLookupString()` translates a key event into text and a `KeySym`. The GUI
 handles the editing keys and sends the full command to the selected worker
