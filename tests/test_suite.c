@@ -3923,6 +3923,17 @@ static int gui_command_was_saved(const char *history_path,
   return saved;
 }
 
+/* The worker saves commands asynchronously after the GUI submits them. */
+static int wait_for_gui_command(const char *history_path,
+                                const char *command) {
+  for (int attempt = 0; attempt < 40; attempt++) {
+    if (gui_command_was_saved(history_path, command))
+      return 1;
+    wait_milliseconds(50);
+  }
+  return 0;
+}
+
 static int test_gui_tab_switching(Display *display, Window window,
                                   const char *working_directory) {
   if (send_gui_key(display, window, XK_t, ControlMask) < 0)
@@ -3978,8 +3989,7 @@ static int test_gui_editor(Display *display, Window window,
       send_gui_text(display, window, "EDITOR_OK") < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
-  wait_milliseconds(500);
-  int delete_word_ok = gui_command_was_saved(
+  int delete_word_ok = wait_for_gui_command(
       history_path, "/usr/bin/echo EDITOR_OK\n");
 
   if (send_gui_text(display, window, "/usr/bin/echo KEEP TRIM") < 0)
@@ -3990,9 +4000,8 @@ static int test_gui_editor(Display *display, Window window,
   if (send_gui_key(display, window, XK_k, ControlMask) < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
-  wait_milliseconds(500);
   int delete_to_end_ok =
-      gui_command_was_saved(history_path, "/usr/bin/echo KEEP\n");
+      wait_for_gui_command(history_path, "/usr/bin/echo KEEP\n");
 
   if (send_gui_text(display, window, "/usr/bin/echo MOVE") < 0 ||
       send_gui_key(display, window, XK_a, ControlMask) < 0 ||
@@ -4000,18 +4009,19 @@ static int test_gui_editor(Display *display, Window window,
       send_gui_text(display, window, "_END") < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
-  wait_milliseconds(500);
   int cursor_keys_ok =
-      gui_command_was_saved(history_path, "/usr/bin/echo MOVE_END\n");
+      wait_for_gui_command(history_path, "/usr/bin/echo MOVE_END\n");
 
   if (send_gui_text(display, window, "discard this line") < 0 ||
       send_gui_key(display, window, XK_u, ControlMask) < 0 ||
       send_gui_text(display, window, "/usr/bin/echo CLEAR_OK") < 0 ||
       send_gui_key(display, window, XK_Return, 0) < 0)
     return -1;
-  wait_milliseconds(500);
+  int clear_command_saved =
+      wait_for_gui_command(history_path, "/usr/bin/echo CLEAR_OK\n");
   char *history = read_text_file(history_path);
-  int delete_to_start_ok = history && contains(history, "/usr/bin/echo CLEAR_OK\n") &&
+  int delete_to_start_ok = clear_command_saved && history &&
+                           contains(history, "/usr/bin/echo CLEAR_OK\n") &&
                            !contains(history, "discard this line");
   free(history);
   if (!delete_word_ok || !delete_to_end_ok || !cursor_keys_ok ||
