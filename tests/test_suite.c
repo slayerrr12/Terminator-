@@ -3504,6 +3504,21 @@ static int read_gui_clipboard(Display *display, Window requestor,
   return 0;
 }
 
+/* Wait for the GUI to process Ctrl+Shift+C before checking its clipboard. */
+static int wait_for_gui_clipboard(Display *display, Window owner,
+                                  Window requestor, const char *expected,
+                                  char *text, size_t text_size) {
+  Atom clipboard = XInternAtom(display, "CLIPBOARD", False);
+  for (int tries = 0; tries < 50; tries++) {
+    if (XGetSelectionOwner(display, clipboard) == owner &&
+        read_gui_clipboard(display, requestor, text, text_size) == 0 &&
+        !strcmp(text, expected))
+      return 0;
+    wait_milliseconds(10);
+  }
+  return -1;
+}
+
 static int answer_clipboard_request(Display *display, Window owner,
                                     const char *clipboard_text,
                                     int reject_utf8) {
@@ -3667,9 +3682,9 @@ static int test_gui_clipboard_copy(Display *display, Window window,
                                marker_text_y) == 0;
   int copied_marker = marker_selected &&
       send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
-      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
-                         sizeof(clipboard_text)) == 0 &&
-      !strcmp(clipboard_text, copied_text);
+      wait_for_gui_clipboard(clipboard_display, window, clipboard_window,
+                             copied_text, clipboard_text,
+                             sizeof(clipboard_text)) == 0;
   XSync(display, False);
   XImage *selection_image =
       copied_marker
@@ -3697,17 +3712,17 @@ static int test_gui_clipboard_copy(Display *display, Window window,
       send_gui_mouse_selection(display, window, 12, first_text_y, second_right,
                                second_text_y) == 0 &&
       send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
-      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
-                         sizeof(clipboard_text)) == 0 &&
-      !strcmp(clipboard_text, multiline_text);
+      wait_for_gui_clipboard(clipboard_display, window, clipboard_window,
+                             multiline_text, clipboard_text,
+                             sizeof(clipboard_text)) == 0;
 
   /* Copy remains available while Ctrl+R or the completion picker is active. */
   int copied_during_search =
       copied_multiline && send_gui_key(display, window, XK_r, ControlMask) == 0 &&
       send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
-      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
-                         sizeof(clipboard_text)) == 0 &&
-      !strcmp(clipboard_text, multiline_text);
+      wait_for_gui_clipboard(clipboard_display, window, clipboard_window,
+                             multiline_text, clipboard_text,
+                             sizeof(clipboard_text)) == 0;
   send_gui_key(display, window, XK_Escape, 0);
 
   /* Without an active selection the clipboard should retain its old value. */
@@ -3733,9 +3748,9 @@ static int test_gui_clipboard_copy(Display *display, Window window,
                                tab_marker_right,
                                tab_marker_y - font->ascent / 2) == 0 &&
       send_gui_key(display, window, XK_c, ControlMask | ShiftMask) == 0 &&
-      read_gui_clipboard(clipboard_display, clipboard_window, clipboard_text,
-                         sizeof(clipboard_text)) == 0 &&
-      !strcmp(clipboard_text, "TAB_COPY_MARKER");
+      wait_for_gui_clipboard(clipboard_display, window, clipboard_window,
+                             "TAB_COPY_MARKER", clipboard_text,
+                             sizeof(clipboard_text)) == 0;
   send_gui_key(display, window, XK_d, ControlMask);
 
   if (copied_marker && copied_multiline && copied_during_search &&
