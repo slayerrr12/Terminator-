@@ -220,8 +220,8 @@ static ShellJob *find_job_by_id(ShellContext *shell,
   return latest;
 }
 
-static ShellJob *record_job(ShellContext *shell, pid_t pgid, JobState state,
-                            pid_t last_pid, const char *command) {
+ShellJob *shell_job_record(ShellContext *shell, pid_t pgid, JobState state,
+                           pid_t last_pid, const char *command) {
   /* Reuse completed slots so each tab's fixed-size job table stays bounded. */
   for (size_t i = 0; i < TERM_MAX_JOBS; ++i) {
     if (shell->jobs[i].state == JOB_UNUSED ||
@@ -263,7 +263,7 @@ static int wait_for_process_group(ShellContext *shell, pid_t pgid,
           if (shell->jobs[i].id == job_id && shell->jobs[i].state != JOB_UNUSED)
             job = &shell->jobs[i];
         if (!job)
-          job = record_job(shell, pgid, JOB_STOPPED, last_pid, command);
+          job = shell_job_record(shell, pgid, JOB_STOPPED, last_pid, command);
         if (job)
           job->state = JOB_STOPPED;
         dprintf(output_fd, "[%d]+ Stopped\t%s\n", job ? job->id : job_id,
@@ -370,7 +370,7 @@ static int execute_pipeline(ShellContext *shell, Pipeline *pipeline,
   int result;
   if (pipeline->background) {
     ShellJob *job =
-        record_job(shell, pgid, JOB_RUNNING, last_pid, pipeline->source);
+        shell_job_record(shell, pgid, JOB_RUNNING, last_pid, pipeline->source);
     if (job)
       dprintf(output_fd, "[%d] %d\n", job->id, (int)pgid);
     else {

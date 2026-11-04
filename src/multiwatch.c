@@ -223,10 +223,39 @@ int shell_builtin_multiwatch(ShellContext *shell, char **arguments,
   if (shell->foreground)
     atomic_store(&shell->foreground->pgid, (int)supervisor);
   int status = 0;
-  while (waitpid(supervisor, &status, WUNTRACED) < 0 && errno == EINTR) {
+  pid_t waited;
+  do {
+    waited = waitpid(supervisor, &status, WUNTRACED);
+  } while (waited < 0 && errno == EINTR);
+  if (waited == supervisor && WIFSTOPPED(status)) {
+    char command[TERM_LINE_MAX] = "multiWatch";
+    size_t command_length = strlen(command);
+    for (size_t i = 1; arguments[i]; ++i) {
+      int added = snprintf(command + command_length,
+                           sizeof(command) - command_length, " %s",
+                           arguments[i]);
+      if (added < 0 || (size_t)added >= sizeof(command) - command_length)
+        break;
+      command_length += (size_t)added;
+    }
+    ShellJob *job = shell_job_record(shell, supervisor, JOB_STOPPED,
+                                     supervisor, command);
+    if (job)
+      dprintf(output_fd, "[%d]+ Stopped\t%s\n", job->id, job->command);
+    else {
+      dprintf(output_fd, "terminator: job table is full; stopping multiWatch\n");
+      (void)kill(-supervisor, SIGCONT);
+      (void)kill(-supervisor, SIGTERM);
+      while (waitpid(supervisor, NULL, 0) < 0 && errno == EINTR) {
+      }
+    }
   }
   if (shell->foreground)
     atomic_store(&shell->foreground->pgid, 0);
+  if (waited < 0)
+    return 1;
+  if (WIFSTOPPED(status))
+    return 128 + WSTOPSIG(status);
   if (WIFSIGNALED(status))
     return 128 + WTERMSIG(status);
   return WIFEXITED(status) ? WEXITSTATUS(status) : 1;

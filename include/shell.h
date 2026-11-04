@@ -68,6 +68,8 @@ int shell_builtin_multiwatch(ShellContext *shell, char **arguments,
                              int output_fd);
 void shell_jobs_cleanup(ShellContext *shell);
 int shell_jobs_list(ShellContext *shell, int output_fd);
+ShellJob *shell_job_record(ShellContext *shell, pid_t pgid, JobState state,
+                           pid_t last_pid, const char *command);
 int shell_job_foreground(ShellContext *shell, char **arguments, int output_fd);
 int shell_job_background(ShellContext *shell, char **arguments, int output_fd);
 #endif
