@@ -870,6 +870,18 @@ static void handle_key_press(App *app, XKeyEvent *key_event) {
     }
     return;
   case HOTKEY_INTERRUPT:
+    /* Ctrl+C cancels text that has not been submitted to the worker yet. */
+    if (!tab->command_is_running &&
+        (tab->input_length || tab->multiline_length)) {
+      tab->input_length = 0;
+      tab->input_cursor = 0;
+      tab->input_buffer[0] = '\0';
+      tab->multiline_length = 0;
+      tab->multiline_buffer[0] = '\0';
+      tab->history_position = 0;
+      append_output_text(tab, "^C\n", 3);
+      return;
+    }
     signal_foreground_job(tab, SIGINT, "^C\n");
     return;
   case HOTKEY_SUSPEND:
