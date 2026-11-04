@@ -111,17 +111,56 @@ static int text_width(XFontStruct *font, const char *text, size_t length) {
   return font ? XTextWidth(font, text, (int)length) : (int)length * 8;
 }
 
+static void draw_text_span(Display *display, Window window, GC graphics,
+                           XFontStruct *font, const char *line, int x,
+                           int baseline, size_t start, size_t end,
+                           unsigned long color) {
+  if (end <= start)
+    return;
+
+  int span_x = x + text_width(font, line, start);
+  XSetForeground(display, graphics, color);
+  XDrawString(display, window, graphics, span_x, baseline, line + start,
+              (int)(end - start));
+}
+
 void selection_draw_line(Display *display, Window window, GC graphics,
                          XFontStruct *font, size_t line_number,
-                         const char *line, int x, int baseline) {
+                         const char *line, int x, int baseline,
+                         const TextColorRange *color_ranges,
+                         size_t color_range_count) {
   remember_display_line(line_number, line);
   size_t length = strlen(line), first = 0, last = 0;
+
+  /* Draw normal text between the requested colored parts of the line. */
+  size_t drawn_until = 0;
+  for (size_t i = 0; color_ranges && i < color_range_count; i++) {
+    size_t start = color_ranges[i].start;
+    size_t end = color_ranges[i].end;
+    if (start > length)
+      start = length;
+    if (end > length)
+      end = length;
+    if (start < drawn_until)
+      start = drawn_until;
+    if (end < start)
+      end = start;
+
+    draw_text_span(display, window, graphics, font, line, x, baseline,
+                   drawn_until, start, 0xf2f2f2);
+    draw_text_span(display, window, graphics, font, line, x, baseline, start,
+                   end, color_ranges[i].color);
+    drawn_until = end;
+  }
+
+  draw_text_span(display, window, graphics, font, line, x, baseline,
+                 drawn_until, length, 0xf2f2f2);
+
   if (!selected_columns(line_number, length, &first, &last)) {
-    XDrawString(display, window, graphics, x, baseline, line, (int)length);
+    XSetForeground(display, graphics, 0xf2f2f2);
     return;
   }
 
-  XDrawString(display, window, graphics, x, baseline, line, (int)first);
   int selected_x = x + text_width(font, line, first);
   int selected_width = text_width(font, line + first, last - first);
   int ascent = font ? font->ascent : 12;
@@ -135,8 +174,6 @@ void selection_draw_line(Display *display, Window window, GC graphics,
   XDrawString(display, window, graphics, selected_x, baseline, line + first,
               (int)(last - first));
   XSetForeground(display, graphics, 0xf2f2f2);
-  XDrawString(display, window, graphics, selected_x + selected_width, baseline,
-              line + last, (int)(length - last));
 }
 
 static int mouse_text_position(int x, int y, size_t visible_rows,

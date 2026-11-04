@@ -69,7 +69,8 @@ static void signal_foreground_job(Tab *tab, int signal_number,
   append_output_text(tab, visible_text, strlen(visible_text));
 }
 
-static void build_shell_prompt(const Tab *tab, char *prompt, size_t size) {
+static void build_shell_prompt(const Tab *tab, char *prompt, size_t size,
+                               size_t *name_length, size_t *path_start) {
   const char *user = getenv("USER");
   char host[128] = "localhost";
   if (!user || !*user)
@@ -87,6 +88,10 @@ static void build_shell_prompt(const Tab *tab, char *prompt, size_t size) {
     cwd = display_cwd;
   }
   snprintf(prompt, size, "%s@%s:%s$ ", user, host, cwd);
+  if (name_length)
+    *name_length = strlen(user) + 1 + strlen(host);
+  if (path_start)
+    *path_start = strlen(user) + strlen(host) + 2;
 }
 
 static int calculate_tab_width(size_t count) {
@@ -229,6 +234,9 @@ static void draw_terminal_window(App *app) {
     const char *input = "";
     size_t input_length = 0;
     size_t input_cursor = 0;
+    size_t name_length = 0;
+    size_t path_start = 0;
+    int shell_prompt = 0;
 
     /* Combine the visible text so mouse selection includes prompt and input. */
     if (prompt_visible && row + 1 == total) {
@@ -245,7 +253,9 @@ static void draw_terminal_window(App *app) {
       } else if (tab->multiline_length) {
         strcpy(prompt, "> ");
       } else {
-        build_shell_prompt(tab, prompt, sizeof(prompt));
+        build_shell_prompt(tab, prompt, sizeof(prompt), &name_length,
+                           &path_start);
+        shell_prompt = 1;
         input = tab->input_buffer;
         input_length = tab->input_length;
         input_cursor = tab->input_cursor;
@@ -264,7 +274,20 @@ static void draw_terminal_window(App *app) {
       memcpy(display_line + output_length + prompt_length, input, input_length);
     }
     display_line[display_length] = '\0';
-    selection_draw_line(dpy, win, gc, font, row - first, display_line, 12, y);
+    TextColorRange prompt_colors[2];
+    size_t prompt_color_count = 0;
+    if (shell_prompt) {
+      prompt_colors[prompt_color_count++] =
+          (TextColorRange){output_length, output_length + name_length,
+                           0x32cd32};
+      size_t path_end = prompt_length >= 2 ? prompt_length - 2 : prompt_length;
+      if (path_end > path_start)
+        prompt_colors[prompt_color_count++] =
+            (TextColorRange){output_length + path_start,
+                             output_length + path_end, 0x32cd32};
+    }
+    selection_draw_line(dpy, win, gc, font, row - first, display_line, 12, y,
+                        prompt_colors, prompt_color_count);
 
     if (prompt_text && tab->scrollback.follows_output) {
       int output_width = font ? XTextWidth(font, output, (int)output_length)
@@ -374,7 +397,7 @@ static void submit_input(App *app, Tab *tab) {
   if (continuation)
     strcpy(prompt, "> ");
   else
-    build_shell_prompt(tab, prompt, sizeof(prompt));
+    build_shell_prompt(tab, prompt, sizeof(prompt), NULL, NULL);
   append_output_text(tab, prompt, strlen(prompt));
   append_output_text(tab, tab->input_buffer, tab->input_length);
   append_output_text(tab, "\n", 1);
