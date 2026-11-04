@@ -244,6 +244,7 @@ static size_t longest_display_line(const Tab *tab) {
     input_length = tab->completion_choice_length;
   } else if (tab->multiline_length) {
     strcpy(prompt, "> ");
+    input_length = tab->input_length;
   } else {
     build_shell_prompt(tab, prompt, sizeof(prompt), NULL, NULL);
     input_length = tab->input_length;
@@ -426,6 +427,9 @@ static void draw_terminal_window(App *app) {
         input_cursor = input_length;
       } else if (tab->multiline_length) {
         strcpy(prompt, "> ");
+        input = tab->input_buffer;
+        input_length = tab->input_length;
+        input_cursor = tab->input_cursor;
       } else {
         build_shell_prompt(tab, prompt, sizeof(prompt), &name_length,
                            &path_start);

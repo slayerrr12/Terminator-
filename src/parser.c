@@ -87,6 +87,7 @@ int shell_is_complete(const char *text)
     return 0;
 
   const char *position = text;
+  int waiting_for_word = 0;
   while (*position)
   {
     /* Ignore whitespace between words and operators. */
@@ -99,6 +100,9 @@ int shell_is_complete(const char *text)
     /* Operators are complete tokens on their own. */
     if (is_operator(*position))
     {
+      /* A pipe needs a following command; redirection needs a file name. */
+      waiting_for_word = *position == '|' || *position == '<' ||
+                         *position == '>';
       position += operator_length(position);
       continue;
     }
@@ -107,10 +111,11 @@ int shell_is_complete(const char *text)
     if (scan_word(position, &word_end) < 0 || word_end == position)
       return 0;
 
+    waiting_for_word = 0;
     position = word_end;
   }
 
-  return 1;
+  return !waiting_for_word;
 }
 
 /* Split operators while keeping quoted operators inside words. */
