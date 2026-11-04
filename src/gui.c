@@ -69,8 +69,7 @@ static void signal_foreground_job(Tab *tab, int signal_number,
   append_output_text(tab, visible_text, strlen(visible_text));
 }
 
-static void build_shell_prompt(const Tab *tab, char *prompt, size_t size,
-                               size_t *name_length, size_t *path_start) {
+static void build_prompt_name(char *name, size_t size) {
   const char *user = getenv("USER");
   char host[128] = "localhost";
   if (!user || !*user)
@@ -78,6 +77,13 @@ static void build_shell_prompt(const Tab *tab, char *prompt, size_t size,
   if (gethostname(host, sizeof(host)) < 0)
     strcpy(host, "localhost");
   host[sizeof(host) - 1] = '\0';
+  snprintf(name, size, "%s@%s", user, host);
+}
+
+static void build_shell_prompt(const Tab *tab, char *prompt, size_t size,
+                               size_t *name_length, size_t *path_start) {
+  char name[TERM_PATH_BUFFER + 256];
+  build_prompt_name(name, sizeof(name));
 
   const char *cwd = tab->working_directory;
   const char *home = getenv("HOME");
@@ -87,11 +93,35 @@ static void build_shell_prompt(const Tab *tab, char *prompt, size_t size,
     snprintf(display_cwd, sizeof(display_cwd), "~%s", cwd + strlen(home));
     cwd = display_cwd;
   }
-  snprintf(prompt, size, "%s@%s:%s$ ", user, host, cwd);
+  snprintf(prompt, size, "%s:%s$ ", name, cwd);
   if (name_length)
-    *name_length = strlen(user) + 1 + strlen(host);
+    *name_length = strlen(name);
   if (path_start)
-    *path_start = strlen(user) + strlen(host) + 2;
+    *path_start = strlen(name) + 1;
+}
+
+/* Submitted commands keep their prompt in scrollback, so color that copy too. */
+static size_t color_saved_prompt(const char *line, size_t length,
+                                 TextColorRange *colors) {
+  char name[TERM_PATH_BUFFER + 256];
+  build_prompt_name(name, sizeof(name));
+  size_t name_length = strlen(name);
+  size_t path_start = name_length + 1;
+  if (length <= path_start || strncmp(line, name, name_length) ||
+      line[name_length] != ':')
+    return 0;
+
+  const char *path_end = strstr(line + path_start, "$ ");
+  if (!path_end || (size_t)(path_end - line) >= length)
+    return 0;
+
+  colors[0] = (TextColorRange){0, name_length, 0x32cd32};
+  size_t color_count = 1;
+  size_t path_end_index = (size_t)(path_end - line);
+  if (path_end_index > path_start)
+    colors[color_count++] =
+        (TextColorRange){path_start, path_end_index, 0x32cd32};
+  return color_count;
 }
 
 static int calculate_tab_width(size_t count) {
@@ -285,7 +315,9 @@ static void draw_terminal_window(App *app) {
         prompt_colors[prompt_color_count++] =
             (TextColorRange){output_length + path_start,
                              output_length + path_end, 0x32cd32};
-    }
+    } else if (output_length)
+      prompt_color_count =
+          color_saved_prompt(output, output_length, prompt_colors);
     selection_draw_line(dpy, win, gc, font, row - first, display_line, 12, y,
                         prompt_colors, prompt_color_count);
 
