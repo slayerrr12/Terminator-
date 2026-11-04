@@ -35,6 +35,8 @@ void scrollback_scroll_down(Scrollback *scrollback, size_t visible_rows,
 void scrollback_scroll_horizontal(Scrollback *scrollback,
                                  size_t maximum_offset, size_t amount,
                                  int direction);
+void scrollback_scroll_horizontal_to(Scrollback *scrollback,
+                                    size_t maximum_offset, size_t offset);
 void scrollback_scroll_to(Scrollback *scrollback, size_t line,
                           size_t visible_rows);
 size_t scrollback_first_visible(const Scrollback *scrollback,

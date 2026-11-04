@@ -15,9 +15,9 @@ tab in a ring, so old output is evicted without moving every remaining line.
 For a line larger than that byte budget, it keeps the tail. Each tab tracks
 whether it follows new output or is showing an earlier line. In the latter
 case, output arriving later does not move the viewed line. The mouse wheel and
-Page Up/Page Down control vertical scrolling; Shift + mouse wheel scrolls
-horizontally across long lines. Scrolling back to the bottom resumes following
-output. When
+Page Up/Page Down control vertical scrolling; the bottom scrollbar and Shift +
+mouse wheel scroll horizontally across long lines. Scrolling back to the bottom
+resumes following output. When
 a command is complete, the GUI writes it to that tab's command pipe. The worker
 returns output and a small status message through two other pipes.
 

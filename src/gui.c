@@ -25,6 +25,8 @@ static GC gc;
 static XFontStruct *font;
 static int width = 900, height = 600;
 static int pointer_x = -1, pointer_y = -1;
+static int horizontal_dragging;
+static int horizontal_drag_grab;
 static Atom wm_delete;
 static HotkeyConfig hotkey_config;
 static void clear_scrollback(Tab *tab) {
@@ -213,6 +215,14 @@ static int terminal_character_width(void) {
   return character_width > 0 ? character_width : 8;
 }
 
+static size_t terminal_visible_columns(void) {
+  size_t columns = width > 12
+                       ? (size_t)(width - 12) /
+                             (size_t)terminal_character_width()
+                       : 1;
+  return columns ? columns : 1;
+}
+
 static size_t longest_display_line(const Tab *tab) {
   size_t longest = 0;
   for (size_t line = 0; line < tab->scrollback.line_count; line++) {
@@ -248,19 +258,94 @@ static size_t longest_display_line(const Tab *tab) {
   return current_length > longest ? current_length : longest;
 }
 
-static void scroll_horizontal(Tab *tab, int direction) {
-  int character_width = terminal_character_width();
-  size_t visible_columns = width > 12
-                              ? (size_t)(width - 12) / (size_t)character_width
-                              : 1;
-  if (!visible_columns)
-    visible_columns = 1;
+static size_t terminal_max_horizontal_offset(const Tab *tab) {
+  size_t visible_columns = terminal_visible_columns();
   size_t content_columns = longest_display_line(tab);
-  size_t maximum_offset = content_columns > visible_columns
-                              ? content_columns - visible_columns
-                              : 0;
+  return content_columns > visible_columns
+             ? content_columns - visible_columns
+             : 0;
+}
+
+static void scroll_horizontal(Tab *tab, int direction) {
+  size_t maximum_offset = terminal_max_horizontal_offset(tab);
   scrollback_scroll_horizontal(&tab->scrollback, maximum_offset, 8,
                                direction);
+}
+
+static int horizontal_track_width(void) {
+  return width > 24 ? width - 24 : 1;
+}
+
+static int horizontal_thumb_width(const Tab *tab) {
+  size_t content_columns = longest_display_line(tab);
+  size_t visible_columns = terminal_visible_columns();
+  int track_width = horizontal_track_width();
+  if (!content_columns || content_columns <= visible_columns)
+    return track_width;
+
+  size_t thumb_width = (size_t)track_width * visible_columns / content_columns;
+  if (thumb_width < 24)
+    thumb_width = 24;
+  if (thumb_width > (size_t)track_width)
+    thumb_width = (size_t)track_width;
+  return (int)thumb_width;
+}
+
+static int horizontal_thumb_x(const Tab *tab) {
+  size_t maximum_offset = terminal_max_horizontal_offset(tab);
+  int track_x = 12;
+  int travel = horizontal_track_width() - horizontal_thumb_width(tab);
+  if (!maximum_offset || travel <= 0)
+    return track_x;
+  return track_x + (int)((size_t)travel * tab->scrollback.horizontal_offset /
+                         maximum_offset);
+}
+
+static void draw_horizontal_scrollbar(const Tab *tab) {
+  size_t maximum_offset = terminal_max_horizontal_offset(tab);
+  if (!maximum_offset)
+    return;
+
+  int track_x = 12;
+  int track_width = horizontal_track_width();
+  int thumb_width = horizontal_thumb_width(tab);
+  int thumb_x = horizontal_thumb_x(tab);
+  int bar_y = height - 9;
+  XSetForeground(dpy, gc, 0x4a2944);
+  XFillRectangle(dpy, win, gc, track_x, bar_y, (unsigned)track_width, 5);
+  XSetForeground(dpy, gc, 0xc0a9b8);
+  XFillRectangle(dpy, win, gc, thumb_x, bar_y, (unsigned)thumb_width, 5);
+  XSetForeground(dpy, gc, 0xf2f2f2);
+}
+
+static void drag_horizontal_scrollbar(Tab *tab, int pointer_position) {
+  size_t maximum_offset = terminal_max_horizontal_offset(tab);
+  int track_x = 12;
+  int travel = horizontal_track_width() - horizontal_thumb_width(tab);
+  if (!maximum_offset || travel <= 0)
+    return;
+
+  int thumb_x = pointer_position - horizontal_drag_grab;
+  if (thumb_x < track_x)
+    thumb_x = track_x;
+  if (thumb_x > track_x + travel)
+    thumb_x = track_x + travel;
+  size_t offset = (size_t)(thumb_x - track_x) * maximum_offset /
+                  (size_t)travel;
+  scrollback_scroll_horizontal_to(&tab->scrollback, maximum_offset, offset);
+}
+
+static void begin_horizontal_scrollbar_drag(Tab *tab, int pointer_position) {
+  int thumb_x = horizontal_thumb_x(tab);
+  int thumb_width = horizontal_thumb_width(tab);
+  if (pointer_position < thumb_x)
+    horizontal_drag_grab = thumb_width / 2;
+  else if (pointer_position > thumb_x + thumb_width)
+    horizontal_drag_grab = thumb_width / 2;
+  else
+    horizontal_drag_grab = pointer_position - thumb_x;
+  horizontal_dragging = 1;
+  drag_horizontal_scrollbar(tab, pointer_position);
 }
 
 static void draw_terminal_window(App *app) {
@@ -304,11 +389,7 @@ static void draw_terminal_window(App *app) {
   if (prompt_visible && total == 0)
     total = 1;
   int character_width = terminal_character_width();
-  size_t visible_columns = width > 12
-                              ? (size_t)(width - 12) / (size_t)character_width
-                              : 1;
-  if (!visible_columns)
-    visible_columns = 1;
+  size_t visible_columns = terminal_visible_columns();
   size_t content_columns = longest_display_line(tab);
   size_t maximum_offset = content_columns > visible_columns
                               ? content_columns - visible_columns
@@ -400,6 +481,7 @@ static void draw_terminal_window(App *app) {
     }
     free(display_line);
   }
+  draw_horizontal_scrollbar(tab);
   XFlush(dpy);
 }
 static void insert_input_text(Tab *tab, const char *text, size_t n) {
@@ -942,6 +1024,13 @@ int gui_run(App *app) {
                 app->active_tab = (size_t)tab_index;
             }
             draw_terminal_window(app);
+          } else if (ev.xbutton.button == Button1 &&
+                     ev.xbutton.y >= height - 14 &&
+                     terminal_max_horizontal_offset(
+                         &app->tabs[app->active_tab]) > 0) {
+            begin_horizontal_scrollbar_drag(
+                &app->tabs[app->active_tab], ev.xbutton.x);
+            draw_terminal_window(app);
           } else if (ev.xbutton.y >= 54 &&
                      (ev.xbutton.button == Button4 ||
                       ev.xbutton.button == Button5)) {
@@ -967,22 +1056,31 @@ int gui_run(App *app) {
         } else if (ev.type == MotionNotify) {
           pointer_x = ev.xmotion.x;
           pointer_y = ev.xmotion.y;
-          if (ev.xmotion.state & Button1Mask)
+          if (horizontal_dragging && (ev.xmotion.state & Button1Mask)) {
+            drag_horizontal_scrollbar(&app->tabs[app->active_tab],
+                                      ev.xmotion.x);
+          } else if (ev.xmotion.state & Button1Mask) {
             selection_mouse_move(app, ev.xmotion.x, ev.xmotion.y,
                                  terminal_visible_rows(),
                                  terminal_line_height(), font,
                                  app->tabs[app->active_tab]
                                      .scrollback.horizontal_offset);
+          }
           draw_terminal_window(app);
         } else if (ev.type == LeaveNotify) {
           pointer_x = pointer_y = -1;
           draw_terminal_window(app);
         } else if (ev.type == ButtonRelease &&
                    ev.xbutton.button == Button1) {
-          selection_mouse_up(app, ev.xbutton.x, ev.xbutton.y,
-                             terminal_visible_rows(), terminal_line_height(),
-                             font, app->tabs[app->active_tab]
-                                       .scrollback.horizontal_offset);
+          if (horizontal_dragging) {
+            horizontal_dragging = 0;
+          } else {
+            selection_mouse_up(app, ev.xbutton.x, ev.xbutton.y,
+                               terminal_visible_rows(),
+                               terminal_line_height(), font,
+                               app->tabs[app->active_tab]
+                                   .scrollback.horizontal_offset);
+          }
           draw_terminal_window(app);
         } else if (ev.type == SelectionRequest || ev.type == SelectionNotify) {
           char paste[TERM_LINE_MAX];

@@ -298,3 +298,9 @@ void scrollback_scroll_horizontal(Scrollback *scrollback,
 
   scrollback->horizontal_offset = current;
 }
+
+void scrollback_scroll_horizontal_to(Scrollback *scrollback,
+                                    size_t maximum_offset, size_t offset) {
+  scrollback->horizontal_offset =
+      offset > maximum_offset ? maximum_offset : offset;
+}
