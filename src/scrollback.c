@@ -261,23 +261,23 @@ void scrollback_scroll_to(Scrollback *scrollback, size_t line,
   scrollback->follows_output = line == maximum;
 }
 
+static void scroll_by(Scrollback *scrollback, size_t visible_rows,
+                      size_t amount, int direction) {
+  size_t current = scrollback_first_visible(scrollback, visible_rows);
+  size_t maximum = maximum_first_line(scrollback, visible_rows);
+  if (direction < 0)
+    current = amount > current ? 0 : current - amount;
+  else
+    current = amount > maximum - current ? maximum : current + amount;
+  scrollback_scroll_to(scrollback, current, visible_rows);
+}
+
 void scrollback_scroll_up(Scrollback *scrollback, size_t visible_rows,
                           size_t amount) {
-  size_t current = scrollback_first_visible(scrollback, visible_rows);
-  if (amount > current)
-    current = 0;
-  else
-    current -= amount;
-  scrollback_scroll_to(scrollback, current, visible_rows);
+  scroll_by(scrollback, visible_rows, amount, -1);
 }
 
 void scrollback_scroll_down(Scrollback *scrollback, size_t visible_rows,
                             size_t amount) {
-  size_t current = scrollback_first_visible(scrollback, visible_rows);
-  size_t maximum = maximum_first_line(scrollback, visible_rows);
-  if (amount > maximum - current)
-    current = maximum;
-  else
-    current += amount;
-  scrollback_scroll_to(scrollback, current, visible_rows);
+  scroll_by(scrollback, visible_rows, amount, 1);
 }

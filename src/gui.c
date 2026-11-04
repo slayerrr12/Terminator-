@@ -8,7 +8,6 @@
 #include <X11/keysym.h>
 #include <errno.h>
 #include <ctype.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,19 +79,25 @@ static void build_prompt_name(char *name, size_t size) {
   snprintf(name, size, "%s@%s", user, host);
 }
 
+static const char *path_for_display(const char *path, char *buffer,
+                                    size_t buffer_size) {
+  const char *home = getenv("HOME");
+  if (home && *home && !strncmp(path, home, strlen(home)) &&
+      (path[strlen(home)] == '\0' || path[strlen(home)] == '/')) {
+    snprintf(buffer, buffer_size, "~%s", path + strlen(home));
+    return buffer;
+  }
+  return path;
+}
+
 static void build_shell_prompt(const Tab *tab, char *prompt, size_t size,
                                size_t *name_length, size_t *path_start) {
   char name[TERM_PATH_BUFFER + 256];
   build_prompt_name(name, sizeof(name));
 
-  const char *cwd = tab->working_directory;
-  const char *home = getenv("HOME");
   char display_cwd[sizeof(tab->working_directory) + 2];
-  if (home && *home && !strncmp(cwd, home, strlen(home)) &&
-      (cwd[strlen(home)] == '\0' || cwd[strlen(home)] == '/')) {
-    snprintf(display_cwd, sizeof(display_cwd), "~%s", cwd + strlen(home));
-    cwd = display_cwd;
-  }
+  const char *cwd = path_for_display(tab->working_directory, display_cwd,
+                                     sizeof(display_cwd));
   snprintf(prompt, size, "%s:%s$ ", name, cwd);
   if (name_length)
     *name_length = strlen(name);
@@ -151,22 +156,12 @@ static int pointer_is_over_tab(size_t count, size_t tab_index) {
 }
 
 static void build_tab_title(const Tab *tab, char *title, size_t capacity) {
-  const char *user = getenv("USER");
-  char host[128] = "localhost";
+  char name[TERM_PATH_BUFFER + 256];
   char display_path[TERM_PATH_BUFFER + 2];
-  const char *path = tab->working_directory;
-  const char *home = getenv("HOME");
-  if (!user || !*user)
-    user = "user";
-  if (gethostname(host, sizeof(host)) < 0)
-    strcpy(host, "localhost");
-  host[sizeof(host) - 1] = '\0';
-  if (home && *home && !strncmp(path, home, strlen(home)) &&
-      (path[strlen(home)] == '\0' || path[strlen(home)] == '/')) {
-    snprintf(display_path, sizeof(display_path), "~%s", path + strlen(home));
-    path = display_path;
-  }
-  snprintf(title, capacity, "%s@%s:%s", user, host, path);
+  build_prompt_name(name, sizeof(name));
+  const char *path = path_for_display(tab->working_directory, display_path,
+                                      sizeof(display_path));
+  snprintf(title, capacity, "%s:%s", name, path);
 }
 
 static void draw_tab_title(const Tab *tab, int x, int y, int max_width) {
@@ -816,11 +811,7 @@ int gui_run(App *app) {
   XMapWindow(dpy, win);
   /* Send the map request before poll() waits on the X connection. */
   XFlush(dpy);
-  for (size_t i = 0; i < app->tab_count; i++) {
-    fcntl(app->tabs[i].worker_to_gui_fd, F_SETFL, O_NONBLOCK);
-    fcntl(app->tabs[i].status_from_worker_fd, F_SETFL, O_NONBLOCK);
-  }
-  int xfd = ConnectionNumber(dpy);
+  int xfd = app->x11_connection_fd;
   while (app->tab_count && !terminator_stopping) {
     struct pollfd pf[1 + TERM_MAX_TABS * 2];
     size_t map[1 + TERM_MAX_TABS * 2];

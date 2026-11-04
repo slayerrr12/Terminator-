@@ -162,6 +162,27 @@ static int collect_offsets(FILE *file, off_t *offsets, size_t capacity,
   return 0;
 }
 
+/* Refresh the cached file size and number of stored commands together. */
+static int refresh_history_metadata(SharedHistory *history) {
+  FILE *file = fopen(history->file_path, "r");
+  if (!file)
+    return -1;
+
+  struct stat info;
+  int result = fstat(fileno(file), &info);
+  if (!result)
+    result = collect_offsets(file, NULL, 0, &history->entry_count);
+  int error_number = errno;
+  fclose(file);
+  if (result < 0) {
+    errno = error_number;
+    return -1;
+  }
+
+  history->file_size = info.st_size;
+  return 0;
+}
+
 /* Keep exactly the last 10,000 commands after an append. */
 static int trim_history_file(const char *path) {
   FILE *source = fopen(path, "r");
@@ -277,18 +298,8 @@ int history_init(SharedHistory *history, int process_shared) {
     close(file_fd);
   if (!result)
     result = trim_history_file(history->file_path);
-  if (!result) {
-    FILE *file = fopen(history->file_path, "r");
-    struct stat info;
-    if (!file || stat(history->file_path, &info) < 0) {
-      result = -1;
-    } else {
-      result = collect_offsets(file, NULL, 0, &history->entry_count);
-      history->file_size = info.st_size;
-    }
-    if (file)
-      fclose(file);
-  }
+  if (!result)
+    result = refresh_history_metadata(history);
   unlock_history(history, lock_fd);
   if (result < 0)
     sem_destroy(&history->semaphore);
@@ -314,15 +325,9 @@ int history_add(SharedHistory *history, const char *command) {
     struct stat info;
     if (fstat(file_fd, &info) < 0) {
       result = -1;
-    } else if (info.st_size != history->file_size) {
-      FILE *current_file = fopen(history->file_path, "r");
-      if (!current_file ||
-          collect_offsets(current_file, NULL, 0, &history->entry_count) < 0)
-        result = -1;
-      if (current_file)
-        fclose(current_file);
-      history->file_size = info.st_size;
-    }
+    } else if (info.st_size != history->file_size &&
+               refresh_history_metadata(history) < 0)
+      result = -1;
     if (!result) {
       result = write_all(file_fd, record, strlen(record));
       if (!result)
@@ -341,18 +346,8 @@ int history_add(SharedHistory *history, const char *command) {
   free(record);
   if (!result && history->entry_count > TERM_HISTORY_CAP) {
     result = trim_history_file(history->file_path);
-    if (!result) {
-      FILE *file = fopen(history->file_path, "r");
-      struct stat info;
-      if (!file || stat(history->file_path, &info) < 0) {
-        result = -1;
-      } else {
-        result = collect_offsets(file, NULL, 0, &history->entry_count);
-        history->file_size = info.st_size;
-      }
-      if (file)
-        fclose(file);
-    }
+    if (!result)
+      result = refresh_history_metadata(history);
   }
   int saved_error = errno;
   unlock_history(history, lock_fd);

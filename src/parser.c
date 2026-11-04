@@ -67,8 +67,18 @@ static int is_redirection(const char *token)
          !strcmp(token, ">>");
 }
 
+static int is_space(char character)
+{
+  return character == ' ' || character == '\t' || character == '\n' ||
+         character == '\r';
+}
+
 static int scan_word(const char *start, const char **end);
 static int is_operator(char character);
+static size_t operator_length(const char *position)
+{
+  return *position == '>' && position[1] == '>' ? 2 : 1;
+}
 
 /* Return false while the GUI should keep collecting a multiline command. */
 int shell_is_complete(const char *text)
@@ -80,8 +90,7 @@ int shell_is_complete(const char *text)
   while (*position)
   {
     /* Ignore whitespace between words and operators. */
-    while (*position == ' ' || *position == '\t' || *position == '\n' ||
-           *position == '\r')
+    while (is_space(*position))
       position++;
 
     if (!*position)
@@ -90,10 +99,7 @@ int shell_is_complete(const char *text)
     /* Operators are complete tokens on their own. */
     if (is_operator(*position))
     {
-      if (*position == '>' && position[1] == '>')
-        position += 2;
-      else
-        position++;
+      position += operator_length(position);
       continue;
     }
 
@@ -118,8 +124,7 @@ int shell_lex(const char *text, Tokens *tokens, char **error)
   while (*position)
   {
     /* Match the whitespace rules used by the original lexer. */
-    while (*position == ' ' || *position == '\t' || *position == '\n' ||
-           *position == '\r')
+    while (is_space(*position))
       position++;
 
     if (!*position)
@@ -128,12 +133,11 @@ int shell_lex(const char *text, Tokens *tokens, char **error)
     /* Operators split words only when they are outside quotes/substitutions. */
     if (is_operator(*position))
     {
-      size_t operator_length =
-          (*position == '>' && position[1] == '>') ? 2 : 1;
-      if (append_token(tokens, position, operator_length) < 0)
+      size_t length = operator_length(position);
+      if (append_token(tokens, position, length) < 0)
         goto out_of_memory;
 
-      position += operator_length;
+      position += length;
       continue;
     }
 
@@ -306,12 +310,6 @@ void shell_pipeline_free(Pipeline *pipeline)
   free(pipeline->source);
   memset(pipeline, 0, sizeof(*pipeline));
 }
-static int is_space(char character)
-{
-  return character == ' ' || character == '\t' || character == '\n' ||
-         character == '\r';
-}
-
 static int is_operator(char character)
 {
   return character == '|' || character == '<' || character == '>' ||

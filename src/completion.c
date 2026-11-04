@@ -122,9 +122,8 @@ static int find_matching_files(const char *working_directory,
     snprintf(candidate, name_length, "%.*s%s%s", (int)directory_length,
              prefix, entry->d_name, S_ISDIR(info.st_mode) ? "/" : "");
     /* Newline and carriage return split input into separate shell words. */
-    if (strchr(candidate, '\n') || strchr(candidate, '\r')) {
-      result_code = 0;
-    } else if (append_candidate(result, candidate) < 0) {
+    if (!(strchr(candidate, '\n') || strchr(candidate, '\r')) &&
+        append_candidate(result, candidate) < 0) {
       result_code = -1;
     }
     free(candidate);

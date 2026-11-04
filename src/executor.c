@@ -29,31 +29,28 @@ int redirection_open_output(const char *path, int append, int error_fd) {
   return fd;
 }
 
+static int connect_file(int file_fd, int target_fd) {
+  if (dup2(file_fd, target_fd) < 0) {
+    int error_number = errno;
+    close(file_fd);
+    errno = error_number;
+    return -1;
+  }
+  close(file_fd);
+  return 0;
+}
+
 int redirection_apply(const SimpleCommand *command, int error_fd) {
   if (command->input_path) {
     int fd = redirection_open_input(command->input_path, error_fd);
-    if (fd < 0)
+    if (fd < 0 || connect_file(fd, STDIN_FILENO) < 0)
       return -1;
-    if (dup2(fd, STDIN_FILENO) < 0) {
-      int err = errno;
-      close(fd);
-      errno = err;
-      return -1;
-    }
-    close(fd);
   }
   if (command->output_path) {
     int fd = redirection_open_output(command->output_path, command->append,
                                      error_fd);
-    if (fd < 0)
+    if (fd < 0 || connect_file(fd, STDOUT_FILENO) < 0)
       return -1;
-    if (dup2(fd, STDOUT_FILENO) < 0) {
-      int err = errno;
-      close(fd);
-      errno = err;
-      return -1;
-    }
-    close(fd);
   }
   return 0;
 }
@@ -65,6 +62,13 @@ static int append_argument(char ***args, size_t *count, char *value) {
   (*args)[(*count)++] = value;
   (*args)[*count] = NULL;
   return 0;
+}
+
+static void close_pipeline_pipes(int (*pipes)[2], size_t pipe_count) {
+  for (size_t i = 0; i < pipe_count; i++) {
+    close(pipes[i][0]);
+    close(pipes[i][1]);
+  }
 }
 
 static int expand_command_arguments(ShellContext *shell, SimpleCommand *command,
@@ -300,10 +304,7 @@ static int execute_pipeline(ShellContext *shell, Pipeline *pipeline,
   for (size_t i = 0; i + 1 < count; ++i) {
     if (pipe(pipes[i]) < 0) {
       dprintf(output_fd, "terminator: pipe: %s\n", strerror(errno));
-      for (size_t j = 0; j < i; ++j) {
-        close(pipes[j][0]);
-        close(pipes[j][1]);
-      }
+      close_pipeline_pipes(pipes, i);
       free(pipes);
       free(pids);
       return 1;
@@ -354,10 +355,7 @@ static int execute_pipeline(ShellContext *shell, Pipeline *pipeline,
     pids[started++] = pid;
     last_pid = pid;
   }
-  for (size_t i = 0; i + 1 < count; ++i) {
-    close(pipes[i][0]);
-    close(pipes[i][1]);
-  }
+  close_pipeline_pipes(pipes, count - 1);
   if (started != count) {
     if (pgid > 0)
       (void)kill(-pgid, SIGTERM);

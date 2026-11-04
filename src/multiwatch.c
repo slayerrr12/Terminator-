@@ -72,7 +72,7 @@ static int add_watch_items(WatchCommand *commands, size_t *count, char *argument
 
 /* Start one command and give the supervisor a nonblocking output pipe. */
 static int start_watched_command(WatchCommand *watch, ShellContext *shell,
-                                 int process_group, int output_fd) {
+                                 pid_t process_group, int output_fd) {
   int output[2];
   if (pipe(output) < 0)
     return -1;
@@ -120,7 +120,7 @@ static int run_watch_supervisor(WatchCommand *commands, size_t count,
     commands[i].pid = 0;
     commands[i].output_fd = -1;
     commands[i].restart_at = 0;
-    if (start_watched_command(&commands[i], shell, (int)group, output_fd) < 0) {
+    if (start_watched_command(&commands[i], shell, group, output_fd) < 0) {
       dprintf(output_fd, "terminator: multiWatch: %s\n", strerror(errno));
       commands[i].restart_at = time(NULL) + 2;
     }
@@ -138,8 +138,7 @@ static int run_watch_supervisor(WatchCommand *commands, size_t count,
             (struct pollfd){commands[i].output_fd, POLLIN | POLLHUP, 0};
         indexes[poll_count++] = i;
       } else if (commands[i].restart_at <= now) {
-        if (start_watched_command(&commands[i], shell, (int)group, output_fd) <
-            0) {
+        if (start_watched_command(&commands[i], shell, group, output_fd) < 0) {
           dprintf(output_fd, "terminator: multiWatch: %s\n", strerror(errno));
           commands[i].restart_at = now + 2;
         }
